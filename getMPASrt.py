@@ -50,7 +50,7 @@ MIN_LON, MAX_LON = 1, 750
 MIN_LAT, MAX_LAT = 1, 1059
 
 # Processing Configuration
-FORECAST_HOURS = 85          # f00 through f84
+FORECAST_HOURS = 84          # f00 through f84
 DAYS_TO_CHECK = 2            # Check today and yesterday
 CYCLES = ['00', '12']
 MAX_RETRIES = 3
@@ -280,7 +280,7 @@ def process_cycle(sftp_holder, date_str, hour, state):
 
     success_count = len(state[cycle_id])  # Count already-processed files
 
-    for fhr in range(FORECAST_HOURS):
+    for fhr in range(1,FORECAST_HOURS+1): #skip hour 0
         # Skip if already downloaded
         if fhr in state[cycle_id]:
             log.debug(f"Skipping {cycle_id} f{fhr:02d} (already processed)")
