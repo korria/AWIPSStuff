@@ -1,17 +1,52 @@
 #!/awips2/python/bin/python
-"""
-obsdump - part of MatchObsAll routines - version 0.215
+# ----------------------------------------------------------------------------
+# This software is in the public domain, furnished "as is", without technical
+# support, and with no warranty, express or implied, as to its usefulness for
+# any purpose.
+#
+# obsdump - part of MatchObsAll routines - version 0.215
+#
+#    Searches through METAR and mesonet netcdf files, and creates ASCII
+#    comma-delimited files of Temp, Dewpoint, Wind Direction, Wind
+#    speed, Wind Gust. If there are many obs in a single hour, the one
+#    nearest the "top of the hour" is saved.
+#
+# Author: Tim Barker - SOO BOI
+#   2025/01/15 - version 0.215. KA. Refactored for clarity and maintainability.
+#                               Fixed station name lookup to fall back to file.
+#   2021/04/21 - version 0.207. MBC. Added support for WaveHeight.
+#   2020/12/18 - version 0.210. JRW. Updated to Python3 using updatePython
+#   2018/06/04 - version 0.206. JRW. Added DUMPAREA to remove obs outside a
+#                                    defined edit area.
+#   2016/11/04 - version 0.205. JRW. Fixed Low Vis problems
+#   2016/08/10 - version 0.204. JRW. Fixed WindGust/pkwnd computation
+#   2016/08/10 - version 0.203. JRW. Removed need to import ObsdumpConfig.
+#   2016/07/01 - version 0.202. JRW. Fixed bugs related to cloud heights.
+#   2016/03/10 - version 0.117. JRW. Modified to run using the DAF.
+#   2016/01/16 - version 0.116. JRW. Fixed Sky cover obs to use lowest coverage.
+#   2015/12/22 - version 0.115. JRW. Modified Visibility to output in 100's.
+#   2015/07/15 - version 0.114. JRW. Fixed Ceiling problem with missing heights.
+#   2015/05/05 - version 0.112. JRW. Modified to use new Uengine Structure.
+#   2014/12/05 - version 0.111. JRW. Added Aviation elements.
+#   2012/01/16 - version 0.110. Change mesonet access for HDF5 files.
+#   2011/07/20 - version 0.108. AWIPS-2 port.
+#   2008/06/10 - version 0.105. Changed into its own procedure.
+#   2008/05/27 - version 0.103. Fix issue with moving ships.
+#   2008/04/11 - version 0.100. Added type checks for getGridCell.
+#   2006/10/10 - version 0.99. Better handle character type of netCDF data.
+#   2005/02/14 - version 0.98. Update version number.
+#   2003/05/27 - version 0.95. Fix typo in getRoughLimits.
+#   2003/04/08 - version 0.93. Non-polygon edit areas handled.
+#   2003/02/26 - version 0.92. Version update only.
+#   2003/02/07 - Add maritime data. Better log messages.
+#   2003/02/06 - Remove commas from site ID or Name.
+#   2003/01/20 - First version.
+# ----------------------------------------------------------------------------
+#
+#  Normally don't want Obsdump to show up in menus - it gets run via cron.
+#
+MenuItems = None
 
-Searches through METAR and mesonet netcdf files, and creates ASCII
-comma-delimited files of Temp, Dewpoint, Wind Direction, Wind speed,
-Wind Gust. If there are many obs in a single hour, the one nearest
-the "top of the hour" is saved.
-
-Author: Tim Barker - SOO BOI
-  2025/01/15 - version 0.215. KCA. Refactored for clarity and maintainability.
-  2021/04/21 - version 0.207. MBC. Added support for WaveHeight.
-  ... (previous history)
-"""
 import datetime
 import os
 import sys
@@ -36,13 +71,13 @@ import MatchObsAllConfigCR as MOAC
 # =============================================================================
 
 GMT_ZONE = dateutil.tz.gettz('GMT')
-MenuItems = None
 
 # Default config values
 CONFIG_DEFAULTS = {
     "DEBUG": 0,
     "PREVHOURS": 8,
     "OBSDIR": "/localapps/runtime/MatchObsAll/data/XXX",
+    "STATIONFILE": "/awips/fxa/ldad/data/mesonetStation.txt",
     "sortareas": [],
     "DUMPAREA": None,
 }
@@ -114,21 +149,17 @@ class StationData:
     name: str
     lat: float
     lon: float
-    _elev: float = 0
+    elev: int = 0
 
-    @property
-    def elev(self) -> int:
-        return self._elev
-
-    @elev.setter
-    def elev(self, value: float) -> None:
-        if value > 20000:
-            self._elev = 20000
-        elif value < -1000:
-            logtime(f"Warning: elevation {value} out of range, clamping to -1000")
-            self._elev = -1000
+    def __post_init__(self):
+        # Clamp elevation to valid range
+        if self.elev > 20000:
+            self.elev = 20000
+        elif self.elev < -1000:
+            logtime(f"Warning: elevation {self.elev} out of range, clamping to -1000")
+            self.elev = -1000
         else:
-            self._elev = int(value)
+            self.elev = int(self.elev)
 
 
 @dataclass
@@ -161,10 +192,10 @@ class Observation:
             self.sky_cover.append(cover)
             if cover == "CLR":
                 self.sky_layer_base.append(25000)
-            elif base > -9000:
+            elif base is not None and base > -9000:
                 self.sky_layer_base.append(int(base))
         elif cover:
-            logtime(f"Unknown sky cover: {cover}")
+            logtime(f"Unknown sky cover: {cover}", 10)
 
     @property
     def skyamt(self) -> Optional[int]:
@@ -189,6 +220,8 @@ class Observation:
         for height, cover in layers:
             if cover in CEILING_COVERS:
                 return height // 100
+
+        for height, cover in layers:
             if cover in NON_CEILING_COVERS:
                 return height // 100
 
@@ -222,15 +255,22 @@ class Observation:
 # =============================================================================
 
 def c_to_f(t: float) -> float:
+    """Convert Celsius to Fahrenheit."""
     return (t * 9.0 / 5.0) + 32.0
 
+
 def k_to_f(t: float) -> float:
+    """Convert Kelvin to Fahrenheit."""
     return (t - 273.15) * 9.0 / 5.0 + 32.0
 
+
 def ms_to_kt(speed: float) -> float:
+    """Convert meters per second to knots."""
     return speed * 1.943
 
+
 def m_to_ft(height: float) -> float:
+    """Convert meters to feet."""
     return height * 3.281
 
 
@@ -253,7 +293,7 @@ def convert_temp(value: float, unit: str) -> Optional[int]:
     if -80 <= result <= 130:
         return result
 
-    logtime(f"Temperature out of range: {result}")
+    logtime(f"Temperature out of range: {result}", 5)
     return None
 
 
@@ -274,7 +314,7 @@ def convert_wind(value: float, unit: str) -> Optional[int]:
     if 0 <= result <= 150:
         return result
 
-    logtime(f"Wind speed out of range: {result}")
+    logtime(f"Wind speed out of range: {result}", 5)
     return None
 
 
@@ -286,6 +326,7 @@ class Procedure(SmartScript.SmartScript):
     def __init__(self, dbss):
         SmartScript.SmartScript.__init__(self, dbss)
         self.station_names: Dict[str, str] = {}
+        self.file_station_names: Dict[str, str] = {}
         self.stations: Dict[str, StationData] = {}
         self.obs: Dict[datetime.datetime, Dict[str, Observation]] = {}
         self.dt_list: List[datetime.datetime] = []
@@ -312,6 +353,10 @@ class Procedure(SmartScript.SmartScript):
 
         self._write_output()
         logtime(f"Total execution time = {time.time() - t0:.1f}s")
+
+    # -------------------------------------------------------------------------
+    # Setup Methods
+    # -------------------------------------------------------------------------
 
     def _setup_sort_areas(self) -> None:
         """Initialize sorting edit areas."""
@@ -358,33 +403,91 @@ class Procedure(SmartScript.SmartScript):
             self.obs[dt] = defaultdict(dict)
             self.dt_list.append(dt)
 
+    # -------------------------------------------------------------------------
+    # Station Name Loading
+    # -------------------------------------------------------------------------
+
     def _load_station_names(self) -> None:
-        """Load station names from database."""
+        """Load station names from database and station file."""
         self.station_names = {}
-        req = DAL.newDataRequest("common_obs_spatial")
-        req.setParameters("stationid", "name")
-        envelope = MultiPoint((
-            (self.lon_max, self.lat_min),
-            (self.lon_min, self.lat_max)
-        ))
-        req.setEnvelope(envelope)
+        self.file_station_names = {}
 
-        for geom in DAL.getGeometryData(req):
-            sid = geom.getString("stationid")
-            if sid not in self.station_names:
-                self.station_names[sid] = geom.getString("name")
+        # First, load from station file as fallback
+        self._load_station_file()
 
-        logtime(f"Loaded {len(self.station_names)} station names")
+        # Then load from DAL (preferred source)
+        try:
+            req = DAL.newDataRequest("common_obs_spatial")
+            req.setParameters("stationid", "name")
+            envelope = MultiPoint((
+                (self.lon_max, self.lat_min),
+                (self.lon_min, self.lat_max)
+            ))
+            req.setEnvelope(envelope)
+
+            for geom in DAL.getGeometryData(req):
+                sid = geom.getString("stationid")
+                name = geom.getString("name")
+                if sid not in self.station_names:
+                    self.station_names[sid] = name
+
+            logtime(f"Loaded {len(self.station_names)} station names from DAL")
+        except Exception as e:
+            logtime(f"Error loading station names from DAL: {e}")
+
+        logtime(f"Loaded {len(self.file_station_names)} station names from file")
+
+    def _load_station_file(self) -> None:
+        """Load station names from mesonet station file."""
+        stnfile = MOAC.Config.get("STATIONFILE", "/awips/fxa/ldad/data/mesonetStation.txt")
+
+        if not os.path.exists(stnfile):
+            logtime(f"Station file not found: {stnfile}")
+            return
+
+        try:
+            with open(stnfile) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    data = line.split("|")
+                    if len(data) < 3:
+                        continue
+                    sid = data[0].strip()
+                    name = data[2].strip().replace(",", " ")
+                    if sid and name:
+                        self.file_station_names[sid] = name
+        except IOError as e:
+            logtime(f"Error reading station file: {e}")
+
+    def _get_station_name(self, sid: str) -> str:
+        """Get station name, falling back to file if DAL returned ID as name."""
+        name = self.station_names.get(sid)
+
+        # If DAL returned the ID as the name or no name found, try the file
+        if name is None or name == sid:
+            name = self.file_station_names.get(sid, sid)
+
+        return name
+
+    # -------------------------------------------------------------------------
+    # Observation Fetching
+    # -------------------------------------------------------------------------
 
     def _fetch_observations(self, source_name: str, config: dict) -> None:
         """Fetch observations from a single source type."""
-        req = DAL.newDataRequest(config["request_type"])
-        req.setParameters(*config["parameters"])
-        envelope = MultiPoint((
-            (self.lon_min, self.lat_min),
-            (self.lon_max, self.lat_max)
-        ))
-        req.setEnvelope(envelope)
+        try:
+            req = DAL.newDataRequest(config["request_type"])
+            req.setParameters(*config["parameters"])
+            envelope = MultiPoint((
+                (self.lon_min, self.lat_min),
+                (self.lon_max, self.lat_max)
+            ))
+            req.setEnvelope(envelope)
+        except Exception as e:
+            logtime(f"Error creating request for {source_name}: {e}")
+            return
 
         delta_30min = datetime.timedelta(minutes=30)
 
@@ -395,7 +498,12 @@ class Procedure(SmartScript.SmartScript):
             end = AbsTime.AbsTime(self._get_epoch(end_dt))
             tr = TimeRange.TimeRange(start, end)
 
-            observations = DAL.getGeometryData(req, tr)
+            try:
+                observations = DAL.getGeometryData(req, tr)
+            except Exception as e:
+                logtime(f"Error fetching {source_name} for {dt}: {e}")
+                continue
+
             if not observations:
                 logtime(f"WARNING: No {source_name} obs retrieved for {dt}")
                 continue
@@ -403,7 +511,10 @@ class Procedure(SmartScript.SmartScript):
             logtime(f"{len(observations)} {source_name} obs retrieved for {dt}", 10)
 
             for ob in observations:
-                self._process_observation(ob, dt, config)
+                try:
+                    self._process_observation(ob, dt, config)
+                except Exception as e:
+                    logtime(f"Error processing {source_name} ob: {e}", 5)
 
     def _process_observation(self, ob, dt: datetime.datetime, config: dict) -> None:
         """Process a single observation record."""
@@ -411,14 +522,19 @@ class Procedure(SmartScript.SmartScript):
 
         # Create station data if needed
         if sid not in self.stations:
-            name = self.station_names.get(sid, sid)
-            elev = ob.getNumber("elevation") * 3.2808 if "elevation" in ob.getParameters() else 0
+            name = self._get_station_name(sid)
+            elev = 0
+            if "elevation" in ob.getParameters():
+                elev_val = ob.getNumber("elevation")
+                if elev_val is not None and elev_val > -9000:
+                    elev = elev_val * 3.2808
+
             self.stations[sid] = StationData(
                 sid=sid,
                 name=name,
                 lat=ob.getGeometry().y,
                 lon=ob.getGeometry().x,
-                _elev=int(min(20000, max(-1000, elev)))
+                elev=int(min(20000, max(-1000, elev)))
             )
 
         ob_time = AbsTime.AbsTime(ob.getDataTime().getRefTime())
@@ -446,44 +562,55 @@ class Procedure(SmartScript.SmartScript):
         temp_unit = config["temp_unit"]
         wind_unit = config["wind_unit"]
 
-        # Sky cover
+        # Sky cover (these are separate records in the data)
         if 'skyCover' in params:
             cover = ob.getString('skyCover')
             base = ob.getNumber('skyLayerBase') if 'skyLayerBase' in params else -9999
             obs_record.add_sky_layer(cover, base)
-            return  # Sky obs are separate records
+            return  # Sky obs are separate records, don't process other fields
 
         # Temperature (prefer tenths if available)
-        if 'tempFromTenths' in params and ob.getNumber('tempFromTenths') > -900:
-            obs_record.temp = convert_temp(ob.getNumber('tempFromTenths'), temp_unit)
+        if 'tempFromTenths' in params:
+            temp_val = ob.getNumber('tempFromTenths')
+            if temp_val is not None and temp_val > -900:
+                obs_record.temp = convert_temp(temp_val, temp_unit)
+            elif 'temperature' in params:
+                obs_record.temp = convert_temp(ob.getNumber('temperature'), temp_unit)
         elif 'temperature' in params:
             obs_record.temp = convert_temp(ob.getNumber('temperature'), temp_unit)
 
         # Dewpoint (prefer tenths if available)
-        if 'dpFromTenths' in params and ob.getNumber('dpFromTenths') > -900:
-            obs_record.dpt = convert_temp(ob.getNumber('dpFromTenths'), temp_unit)
+        if 'dpFromTenths' in params:
+            dp_val = ob.getNumber('dpFromTenths')
+            if dp_val is not None and dp_val > -900:
+                obs_record.dpt = convert_temp(dp_val, temp_unit)
+            elif 'dewpoint' in params:
+                obs_record.dpt = convert_temp(ob.getNumber('dewpoint'), temp_unit)
         elif 'dewpoint' in params:
             obs_record.dpt = convert_temp(ob.getNumber('dewpoint'), temp_unit)
 
-        # Wind
+        # Wind direction
         if 'windDir' in params:
             wdir = ob.getNumber('windDir')
-            if wdir is not None and 0 <= wdir <= 360:
+            if wdir is not None and wdir > -9000 and 0 <= wdir <= 360:
                 obs_record.wdir = int(wdir)
 
+        # Wind speed
         if 'windSpeed' in params:
             obs_record.wspd = convert_wind(ob.getNumber('windSpeed'), wind_unit)
 
+        # Wind gust
         if 'windGust' in params:
             obs_record.gust = convert_wind(ob.getNumber('windGust'), wind_unit)
 
+        # Peak wind
         if 'pkwndSpeed' in params:
             obs_record.pkwd = convert_wind(ob.getNumber('pkwndSpeed'), wind_unit)
 
         # Visibility
         if 'visibility' in params:
             vis = ob.getNumber('visibility')
-            if vis is not None and 0 <= vis <= 10:
+            if vis is not None and vis > -9000 and 0 <= vis <= 10:
                 obs_record.vsby = vis
 
         # Wave height
@@ -492,11 +619,18 @@ class Procedure(SmartScript.SmartScript):
             if wh is not None and wh > -9000:
                 obs_record.wvehght = int(m_to_ft(wh))
 
+    # -------------------------------------------------------------------------
+    # Output
+    # -------------------------------------------------------------------------
+
     def _sort_observations(self, dt: datetime.datetime) -> List[Tuple[int, int, str]]:
         """Sort observations by area and elevation."""
         order = []
 
         for sid in self.obs[dt]:
+            if sid not in self.stations:
+                continue
+
             station = self.stations[sid]
             grid_cell = self.getGridCell(station.lat, station.lon)
 
@@ -505,15 +639,21 @@ class Procedure(SmartScript.SmartScript):
 
             x, y = int(grid_cell[0]), int(grid_cell[1])
 
-            if self.dump_mask[y, x] < 0.5:
+            try:
+                if self.dump_mask[y, x] < 0.5:
+                    continue
+            except IndexError:
                 continue
 
             # Find which sort area contains this station
             sort_val = 9999
             for i, mask in enumerate(self.sort_masks):
-                if mask[y, x] > 0:
-                    sort_val = i
-                    break
+                try:
+                    if mask[y, x] > 0:
+                        sort_val = i
+                        break
+                except IndexError:
+                    continue
 
             order.append((sort_val, 20000 - station.elev, sid))
 
@@ -522,11 +662,16 @@ class Procedure(SmartScript.SmartScript):
 
     def _write_output(self) -> None:
         """Write observation files."""
-        os.makedirs(MOAC.Config["OBSDIR"], exist_ok=True)
+        try:
+            os.makedirs(MOAC.Config["OBSDIR"], exist_ok=True)
+        except OSError as e:
+            logtime(f"Error creating output directory: {e}")
+            return
 
         for dt in self.dt_list:
             sorted_stations = self._sort_observations(dt)
             if not sorted_stations:
+                logtime(f"No observations to write for {dt}")
                 continue
 
             lines = []
@@ -547,7 +692,7 @@ class Procedure(SmartScript.SmartScript):
 
                 # Write observation line
                 stn = self.stations[sid]
-                obs = self.obs[dt][sid]
+                obs_rec = self.obs[dt][sid]
 
                 try:
                     line = (
@@ -556,15 +701,15 @@ class Procedure(SmartScript.SmartScript):
                         f"{stn.lat:7.4f},"
                         f"{stn.lon:9.4f},"
                         f"{stn.elev:5d},"
-                        f"{obs.format_value(obs.temp)},"
-                        f"{obs.format_value(obs.dpt)},"
-                        f"{obs.format_value(obs.wdir)},"
-                        f"{obs.format_value(obs.wspd)},"
-                        f"{obs.format_value(obs.effective_gust)},"
-                        f"{obs.format_value(obs.skyamt)},"
-                        f"{obs.format_value(obs.cig)},"
-                        f"{obs.format_vis()},"
-                        f"{obs.format_value(obs.wvehght)},"
+                        f"{obs_rec.format_value(obs_rec.temp)},"
+                        f"{obs_rec.format_value(obs_rec.dpt)},"
+                        f"{obs_rec.format_value(obs_rec.wdir)},"
+                        f"{obs_rec.format_value(obs_rec.wspd)},"
+                        f"{obs_rec.format_value(obs_rec.effective_gust)},"
+                        f"{obs_rec.format_value(obs_rec.skyamt)},"
+                        f"{obs_rec.format_value(obs_rec.cig)},"
+                        f"{obs_rec.format_vis()},"
+                        f"{obs_rec.format_value(obs_rec.wvehght)},"
                         f"{site_name}\n"
                     )
                     lines.append(line)
@@ -572,11 +717,21 @@ class Procedure(SmartScript.SmartScript):
                     logtime(f"Error formatting {sid}: {e}")
 
             # Write file
-            outfile = os.path.join(MOAC.Config["OBSDIR"], f"{dt.strftime('%Y%m%d%H')}00.dat")
-            with open(outfile, 'w') as f:
-                f.writelines(lines)
+            outfile = os.path.join(
+                MOAC.Config["OBSDIR"],
+                f"{dt.strftime('%Y%m%d%H')}00.dat"
+            )
 
-            logtime(f"Wrote {len(lines)} lines to {outfile}")
+            try:
+                with open(outfile, 'w') as f:
+                    f.writelines(lines)
+                logtime(f"Wrote {len(lines)} lines to {outfile}")
+            except IOError as e:
+                logtime(f"Error writing {outfile}: {e}")
+
+    # -------------------------------------------------------------------------
+    # Utility Methods
+    # -------------------------------------------------------------------------
 
     def _get_epoch(self, dt: datetime.datetime) -> float:
         """Convert datetime to Unix epoch."""
