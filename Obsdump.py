@@ -4,7 +4,7 @@
 # support, and with no warranty, express or implied, as to its usefulness for
 # any purpose.
 #
-# obsdump - part of MatchObsAll routines - version 0.215
+# obsdump - part of MatchObsAll routines - version 0.216
 #
 #    Searches through METAR and mesonet netcdf files, and creates ASCII
 #    comma-delimited files of Temp, Dewpoint, Wind Direction, Wind
@@ -12,6 +12,8 @@
 #    nearest the "top of the hour" is saved.
 #
 # Author: Tim Barker - SOO BOI
+#   2025/01/20 - version 0.216. KA. Load station names and elevation from
+#                               station file as primary source.
 #   2025/01/15 - version 0.215. KA. Refactored for clarity and maintainability.
 #                               Fixed station name lookup to fall back to file.
 #   2021/04/21 - version 0.207. MBC. Added support for WaveHeight.
@@ -271,7 +273,7 @@ def ms_to_kt(speed: float) -> float:
 
 def m_to_ft(height: float) -> float:
     """Convert meters to feet."""
-    return height * 3.281
+    return height * 3.2808
 
 
 def convert_temp(value: float, unit: str) -> Optional[int]:
@@ -325,8 +327,8 @@ def convert_wind(value: float, unit: str) -> Optional[int]:
 class Procedure(SmartScript.SmartScript):
     def __init__(self, dbss):
         SmartScript.SmartScript.__init__(self, dbss)
-        self.station_names: Dict[str, str] = {}
         self.file_station_names: Dict[str, str] = {}
+        self.file_station_elevs: Dict[str, int] = {}
         self.stations: Dict[str, StationData] = {}
         self.obs: Dict[datetime.datetime, Dict[str, Observation]] = {}
         self.dt_list: List[datetime.datetime] = []
@@ -344,7 +346,7 @@ class Procedure(SmartScript.SmartScript):
         self._setup_dump_area()
         self._setup_grid_limits()
         self._setup_time_list()
-        self._load_station_names()
+        self._load_station_file()
 
         # Fetch observations from all sources
         for source_name, source_config in OB_SOURCES.items():
@@ -404,41 +406,15 @@ class Procedure(SmartScript.SmartScript):
             self.dt_list.append(dt)
 
     # -------------------------------------------------------------------------
-    # Station Name Loading
+    # Station File Loading
     # -------------------------------------------------------------------------
 
-    def _load_station_names(self) -> None:
-        """Load station names from database and station file."""
-        self.station_names = {}
-        self.file_station_names = {}
-
-        # First, load from station file as fallback
-        self._load_station_file()
-
-        # Then load from DAL (preferred source)
-        try:
-            req = DAL.newDataRequest("common_obs_spatial")
-            req.setParameters("stationid", "name")
-            envelope = MultiPoint((
-                (self.lon_max, self.lat_min),
-                (self.lon_min, self.lat_max)
-            ))
-            req.setEnvelope(envelope)
-
-            for geom in DAL.getGeometryData(req):
-                sid = geom.getString("stationid")
-                name = geom.getString("name")
-                if sid not in self.station_names:
-                    self.station_names[sid] = name
-
-            logtime(f"Loaded {len(self.station_names)} station names from DAL")
-        except Exception as e:
-            logtime(f"Error loading station names from DAL: {e}")
-
-        logtime(f"Loaded {len(self.file_station_names)} station names from file")
-
     def _load_station_file(self) -> None:
-        """Load station names from mesonet station file."""
+        """Load station names and elevations from mesonet station file.
+        
+        File format: SID|SID|NAME|ELEV_M|LAT|LON|...
+        Elevation is in meters, converted to feet.
+        """
         stnfile = MOAC.Config.get("STATIONFILE", "/awips/fxa/ldad/data/mesonetStation.txt")
 
         if not os.path.exists(stnfile):
@@ -452,24 +428,56 @@ class Procedure(SmartScript.SmartScript):
                     if not line:
                         continue
                     data = line.split("|")
-                    if len(data) < 3:
+                    if len(data) < 4:
                         continue
+                    
                     sid = data[0].strip()
+                    if not sid:
+                        continue
+                    
+                    # Column 2: station name
                     name = data[2].strip().replace(",", " ")
-                    if sid and name:
+                    if name:
                         self.file_station_names[sid] = name
+                    
+                    # Column 3: elevation in meters
+                    try:
+                        elev_m = float(data[3].strip())
+                        elev_ft = int(round(m_to_ft(elev_m)))
+                        self.file_station_elevs[sid] = elev_ft
+                    except (ValueError, IndexError):
+                        pass
+
+            logtime(f"Loaded {len(self.file_station_names)} station names from file")
+            logtime(f"Loaded {len(self.file_station_elevs)} station elevations from file")
         except IOError as e:
             logtime(f"Error reading station file: {e}")
 
     def _get_station_name(self, sid: str) -> str:
-        """Get station name, falling back to file if DAL returned ID as name."""
-        name = self.station_names.get(sid)
+        """Get station name from file, defaulting to station ID."""
+        return self.file_station_names.get(sid, sid)
 
-        # If DAL returned the ID as the name or no name found, try the file
-        if name is None or name == sid:
-            name = self.file_station_names.get(sid, sid)
-
-        return name
+    def _get_station_elev(self, sid: str, ob) -> int:
+        """Get station elevation from file, falling back to observation data.
+        
+        Args:
+            sid: Station ID
+            ob: Observation object (for fallback elevation)
+            
+        Returns:
+            Elevation in feet
+        """
+        # Primary source: station file
+        if sid in self.file_station_elevs:
+            return self.file_station_elevs[sid]
+        
+        # Fallback: observation data
+        if "elevation" in ob.getParameters():
+            elev_val = ob.getNumber("elevation")
+            if elev_val is not None and elev_val > -9000:
+                return int(m_to_ft(elev_val))
+        
+        return 0
 
     # -------------------------------------------------------------------------
     # Observation Fetching
@@ -523,18 +531,14 @@ class Procedure(SmartScript.SmartScript):
         # Create station data if needed
         if sid not in self.stations:
             name = self._get_station_name(sid)
-            elev = 0
-            if "elevation" in ob.getParameters():
-                elev_val = ob.getNumber("elevation")
-                if elev_val is not None and elev_val > -9000:
-                    elev = elev_val * 3.2808
+            elev = self._get_station_elev(sid, ob)
 
             self.stations[sid] = StationData(
                 sid=sid,
                 name=name,
                 lat=ob.getGeometry().y,
                 lon=ob.getGeometry().x,
-                elev=int(min(20000, max(-1000, elev)))
+                elev=elev
             )
 
         ob_time = AbsTime.AbsTime(ob.getDataTime().getRefTime())
