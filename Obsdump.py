@@ -415,7 +415,7 @@ class Procedure(SmartScript.SmartScript):
         File format: SID|SID|NAME|ELEV_M|LAT|LON|...
         Elevation is in meters, converted to feet.
         """
-        stnfile = MOAC.Config.get("STATIONFILE", "/awips/fxa/ldad/data/mesonetStation.txt")
+        stnfile = MOAC.Config.get("STATIONFILE", "/data/fxa/ldad/data/UTMESNETStation.txt")
 
         if not os.path.exists(stnfile):
             logtime(f"Station file not found: {stnfile}")
