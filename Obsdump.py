@@ -79,7 +79,7 @@ CONFIG_DEFAULTS = {
     "DEBUG": 0,
     "PREVHOURS": 8,
     "OBSDIR": "/localapps/runtime/MatchObsAll/data/XXX",
-    "STATIONFILE": "/awips/fxa/ldad/data/mesonetStation.txt",
+    "STATIONFILE": "/data/fxa/ldad/data/UTMESNETStation.txt",
     "sortareas": [],
     "DUMPAREA": None,
 }
