@@ -55,8 +55,6 @@ ModelConfig = [
     "CONSMOS        |#bfbfbf|CONS",
     "BCCONSMOS      |#ffff7f|CONS",
     "SuperBlend     |#7F007f|CONS",
-    "WPCGuide       |#3f7fff|WPC",
-    "WPCGuideBC     |#7fbfff|WPC",
 ]
 
 # Observation database options - color and dash pattern for each source
@@ -562,27 +560,20 @@ class Tool(SmartScript.SmartScript):
         sys.stdout.flush()
         
         try:
-            foundSource = None
-            altNames = {"Obs": ["Obs", "Observed", "Metar", "METAR", "Ob", "OBS"],
-                       "URMA": ["URMA", "URMA25", "URMAe", "URMA_25", "URMA 25"],
-                       "RTMA": ["RTMA", "RTMA25", "RTMAe", "RTMA_25", "RTMA 25"]}.get(self.obsSource, [self.obsSource])
-            
             # Try with mapped element name first, then original
             elementsToTry = [obsElement] if obsElement != element else [element]
             if obsElement != element:
                 elementsToTry.append(element)
             
+            foundSource = None
             for tryElement in elementsToTry:
-                for altSource in altNames:
-                    print("fetchObsData: trying %s / %s" % (tryElement, altSource))
+                print("fetchObsData: trying %s / %s" % (tryElement, self.obsSource))
+                sys.stdout.flush()
+                if self.VU.checkFile(tryElement, self.obsSource):
+                    foundSource = self.obsSource
+                    obsElement = tryElement
+                    print("fetchObsData: FOUND %s / %s" % (tryElement, foundSource))
                     sys.stdout.flush()
-                    if self.VU.checkFile(tryElement, altSource):
-                        foundSource = altSource
-                        obsElement = tryElement
-                        print("fetchObsData: FOUND %s / %s" % (tryElement, altSource))
-                        sys.stdout.flush()
-                        break
-                if foundSource:
                     break
             
             if foundSource is None:
