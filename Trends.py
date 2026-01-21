@@ -503,6 +503,8 @@ class Tool(SmartScript.SmartScript):
             self.dlg.update_idletasks()
 
         # Fetch observation data if enabled
+        print("getStuff: checking obsSource = '%s'" % self.obsSource)
+        sys.stdout.flush()
         if self.obsSource != "None":
             self.fetchObsData(reqElement, eaFlat, FullTimeRange, accumVal)
 
@@ -527,33 +529,82 @@ class Tool(SmartScript.SmartScript):
         if self.obsSource == "None":
             return
         
-        modeVal = {"QPF": "Sum", "SnowAmt": "Sum", "MaxT": "Max", "MinT": "Min"}.get(element, "TimeWtAverage")
+        # Check if the period is at least partially in the past
+        currentTime = self._gmtime().unixTime()
+        if self.perStart >= currentTime:
+            print("fetchObsData: period is entirely in the future, no observations available")
+            sys.stdout.flush()
+            return
+        
+        # Adjust end time if period extends into the future
+        obsEndTime = min(self.perEnd, currentTime)
+        
+        print("fetchObsData: source=%s, element=%s, period=%d-%d (obs end=%d)" % 
+              (self.obsSource, element, self.perStart, self.perEnd, obsEndTime))
+        sys.stdout.flush()
+        
+        # Map forecast element names to observation element names
+        # Obs databases often store T instead of MaxT/MinT, Td instead of TdMrn/TdAft, etc.
+        obsElementMap = {
+            "MaxT": "T",
+            "MinT": "T",
+            "MaxRH": "RH",
+            "MinRH": "RH",
+            "TdMrn": "Td",
+            "TdAft": "Td",
+        }
+        obsElement = obsElementMap.get(element, element)
+        
+        modeVal = {"QPF": "Sum", "SnowAmt": "Sum", "MaxT": "Max", "MinT": "Min", 
+                   "MaxRH": "Max", "MinRH": "Min", "TdMrn": "Min", "TdAft": "Max"}.get(element, "TimeWtAverage")
+        
+        print("fetchObsData: obsElement=%s, mode=%s" % (obsElement, modeVal))
+        sys.stdout.flush()
         
         try:
             foundSource = None
-            altNames = {"Obs": ["Obs", "Metar", "METAR", "Observed"],
-                       "URMA": ["URMA", "URMA25", "URMAe"],
-                       "RTMA": ["RTMA", "RTMA25", "RTMAe"]}.get(self.obsSource, [self.obsSource])
+            altNames = {"Obs": ["Obs", "Observed", "Metar", "METAR", "Ob", "OBS"],
+                       "URMA": ["URMA", "URMA25", "URMAe", "URMA_25", "URMA 25"],
+                       "RTMA": ["RTMA", "RTMA25", "RTMAe", "RTMA_25", "RTMA 25"]}.get(self.obsSource, [self.obsSource])
             
-            for altSource in altNames:
-                if self.VU.checkFile(element, altSource):
-                    foundSource = altSource
+            # Try with mapped element name first, then original
+            elementsToTry = [obsElement] if obsElement != element else [element]
+            if obsElement != element:
+                elementsToTry.append(element)
+            
+            for tryElement in elementsToTry:
+                for altSource in altNames:
+                    print("fetchObsData: trying %s / %s" % (tryElement, altSource))
+                    sys.stdout.flush()
+                    if self.VU.checkFile(tryElement, altSource):
+                        foundSource = altSource
+                        obsElement = tryElement
+                        print("fetchObsData: FOUND %s / %s" % (tryElement, altSource))
+                        sys.stdout.flush()
+                        break
+                if foundSource:
                     break
             
             if foundSource is None:
                 print("Could not find observation data for %s in %s" % (element, self.obsSource))
+                sys.stdout.flush()
                 return
             
-            obsCases = self.getModelCases(element, foundSource, self.perStart, self.perEnd, accum=accumVal)
+            obsCases = self.getModelCases(obsElement, foundSource, self.perStart, obsEndTime, accum=accumVal)
             if not obsCases:
+                print("fetchObsData: no cases found for %s / %s in time range %d-%d" % (obsElement, foundSource, self.perStart, obsEndTime))
+                sys.stdout.flush()
                 return
+            
+            print("fetchObsData: found %d cases" % len(obsCases))
+            sys.stdout.flush()
             
             for casekey in sorted(obsCases.keys()):
                 (basestr, startstr, endstr) = casekey.split(",")
                 base = int(basestr)
                 recs = obsCases[casekey]
                 
-                obsGrid = self.VU.getVerGrids(foundSource, base, element, self.perStart, self.perEnd, mode=modeVal, recList=recs)
+                obsGrid = self.VU.getVerGrids(foundSource, base, obsElement, self.perStart, obsEndTime, mode=modeVal, recList=recs)
                 if obsGrid is None:
                     continue
                 if not isinstance(obsGrid, np.ndarray) and len(obsGrid) == 2:
@@ -571,11 +622,17 @@ class Tool(SmartScript.SmartScript):
                 self.obsFull[obsKey] = fullFlag
                 self.allmax = max(self.allmax, statsList[1])
                 self.allmin = min(self.allmin, statsList[0])
+                print("fetchObsData: stored %s with value=%s" % (obsKey, statsList[2]))
+                sys.stdout.flush()
                 
         except Exception as e:
             print("Error fetching observation data: %s" % str(e))
             import traceback
             traceback.print_exc()
+            sys.stdout.flush()
+        
+        print("fetchObsData: completed with %d obs points" % len(self.obsData))
+        sys.stdout.flush()
 
     def getStats(self, grid, areaFlat):
         flatGrid = np.ravel(grid)
@@ -758,6 +815,9 @@ class Tool(SmartScript.SmartScript):
 
     def drawObsLine(self, graphType, labelPosition):
         """Draw the observation data as a dashed line."""
+        print("drawObsLine: graphType=%d, obsData count=%d" % (graphType, len(self.obsData)))
+        sys.stdout.flush()
+        
         obsConfig = ObsSourceConfig.get(self.obsSource, {})
         obsColor = obsConfig.get("color", "#00DD00")
         obsDash = obsConfig.get("dash", (6, 4))
@@ -930,6 +990,8 @@ class Tool(SmartScript.SmartScript):
             self.graphStart = self.mintime
         elif changeType == "ObsSourceChange":
             self.obsSource = self.dlg.obsSource.get()
+            print("popupHandler: ObsSourceChange - new obsSource = '%s'" % self.obsSource)
+            sys.stdout.flush()
             self.getStuff("Update")
             return
 
