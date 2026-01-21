@@ -5,10 +5,10 @@
 #
 # Trends - version 2.0
 #
-# Show trends of values over many models/runs with optional observed data overlay.
+# Show trends of values over many models/runs with observed data overlay.
 #
 # 1.0 - initial version - Timothy Barker  
-# 2.0 - Added observation overlay support (Obs, URMA, RTMA) with dashed lines
+# 2.0 - Added observation overlay (Obs, URMA, RTMA) with dashed lines - Korri Anderson
 # ----------------------------------------------------------------------------
 #
 # C O N F I G U R A T I O N   S E C T I O N
@@ -16,55 +16,67 @@
 # ----------------------------------------------------------------------------
 
 ModelConfig = [
+    # Fcst - Black (stands out as THE forecast)
     "Fcst           |#000000|X",
-    "GFS            |#7f0000|GFS",
-    "GFSBC          |#ff0000|GFS",
-    "ADJMEX         |#7f3f00|GFS",
-    "ADJMEXBC       |#ff7f00|GFS",
-    "ADJMAV         |#bfbf00|GFS",
-    "ADJMAVBC       |#ffff00|GFS",
-    "ECMWF          |#00007f|EC",
-    "ECMWFBC        |#0000ff|EC",
-    "ADJECE         |#3f007f|EC",
-    "ADJECEBC       |#7f007f|EC",
-    "ADJECS         |#bf00bf|EC",
-    "ADJECSBC       |#ff00ff|EC",
-    "ADJECH         |#7f00ff|EC",
-    "ADJECM         |#7f7fff|EC",
-    "ADJECL         |#ffff7f|EC",
-    "CMCnh          |#7fbfff|CAN",
-    "CMCnhBC        |#3f7fff|CAN",
-    "CMCreg         |#7fbfff|CAN",
-    "CMCregBC       |#3f7fff|CAN",
-    "NAM12          |#007f00|NAM",
-    "NAM12BC        |#00ff00|NAM",
-    "ADJMET         |#007f7f|NAM",
-    "ADJMETBC       |#00bfbf|NAM",
-    "SREF           |#003f3f|NAM",
-    "SREFBC         |#007f7f|NAM",
-    "HIRESWarw      |#1f7f3f|NAM",
-    "HIRESWarwBC    |#3fff7f|NAM",
-    "HIRESWnmm      |#3fff1f|NAM",
-    "HIRESWnmmBC    |#7fff3f|NAM",
-    "NBM            |#3f3fff|CONS",
-    "NBMEXP         |#3030f0|CONS",
-    "CONSAll        |#3f3f3f|CONS",
-    "BCCONSAll      |#7fffff|CONS",
-    "CONSRaw        |#7f7f7f|CONS",
-    "BCCONSRaw      |#ff7fff|CONS",
-    "CONSMOS        |#bfbfbf|CONS",
-    "BCCONSMOS      |#ffff7f|CONS",
-    "SuperBlend     |#7F007f|CONS",
-    "WPCGuide       |#3f7fff|WPC",
-    "WPCGuideBC     |#7fbfff|WPC",
+    "GFS            |#8B0000|GFS",      # Dark red
+    "GFSBC          |#DC143C|GFS",      # Crimson
+    "ADJMEX         |#B22222|GFS",      # Firebrick
+    "ADJMEXBC       |#FF4500|GFS",      # Orange red
+    "ADJMAV         |#CD5C5C|GFS",      # Indian red
+    "ADJMAVBC       |#FA8072|GFS",      # Salmon
+    "ECMWF          |#00008B|EC",       # Dark blue
+    "ECMWFBC        |#0000FF|EC",       # Blue
+    "ECAIFS         |#191970|EC",       # Midnight blue
+    "ECAIFSBC       |#4169E1|EC",       # Royal blue
+    "ADJECE         |#4B0082|EC",       # Indigo
+    "ADJECEBC       |#8A2BE2|EC",       # Blue violet
+    "ADJECS         |#800080|EC",       # Purple
+    "ADJECSBC       |#DA70D6|EC",       # Orchid
+    "ADJECH         |#9400D3|EC",       # Dark violet
+    "ADJECM         |#9370DB|EC",       # Medium purple
+    "ADJECL         |#DDA0DD|EC",       # Plum
+    "CMCnh          |#006666|CAN",      # Dark cyan
+    "CMCnhBC        |#00CED1|CAN",      # Dark turquoise
+    "CMCreg         |#008080|CAN",      # Teal
+    "CMCregBC       |#20B2AA|CAN",      # Light sea green
+    "HRDPS          |#008B8B|CAN",      # Dark cyan
+    "HRDPSBC        |#40E0D0|CAN",      # Turquoise
+    "NAM12          |#006400|NAM",      # Dark green
+    "NAM12BC        |#228B22|NAM",      # Forest green
+    "ADJMET         |#2E8B57|NAM",      # Sea green
+    "ADJMETBC       |#3CB371|NAM",      # Medium sea green
+    "SREF           |#556B2F|NAM",      # Dark olive
+    "SREFBC         |#6B8E23|NAM",      # Olive drab
+    "HIRESWarw      |#008000|NAM",      # Green
+    "HIRESWarwBC    |#32CD32|NAM",      # Lime green
+    "HIRESWnmm      |#228B22|NAM",      # Forest green
+    "HIRESWnmmBC    |#90EE90|NAM",      # Light green
+    "NAMNest        |#808000|NAM",      # Olive
+    "NAMNestBC      |#9ACD32|NAM",      # Yellow green
+    "LRRFS          |#FF8C00|MPA",      # Dark orange
+    "LRRFSBC        |#FFA500|MPA",      # Orange
+    "MPASRT         |#D2691E|MPA",      # Chocolate
+    "MPASRTBC       |#F4A460|MPA",      # Sandy brown
+    "UWWRF1         |#696969|WRF",      # Dim gray
+    "UWWRF1BC       |#A9A9A9|WRF",      # Dark gray
+    "NBM            |#4682B4|NBM",      # Steel blue
+    "NBMEXP         |#6495ED|NBM",      # Cornflower blue
+    "CONSAll        |#2F4F4F|CONS",     # Dark slate gray
+    "BCCONSAll      |#708090|CONS",     # Slate gray
+    "CONSRaw        |#778899|CONS",     # Light slate gray
+    "BCCONSRaw      |#B0C4DE|CONS",     # Light steel blue
+    "CONSMOS        |#8B8682|CONS",     # Warm gray
+    "BCCONSMOS      |#C0C0C0|CONS",     # Silver
+    "SuperBlend     |#8B008B|CONS",     # Dark magenta
+    "WPCGuide       |#00BFFF|WPC",      # Deep sky blue
 ]
 
 # Observation database options - color and dash pattern for each source
 ObsSourceConfig = {
     "None": {"color": None, "dash": None, "label": None},
-    "Obs": {"color": "#00DD00", "dash": (6, 4), "label": "Observed"},
-    "URMA": {"color": "#FF6600", "dash": (6, 4), "label": "URMA Analysis"},
-    "RTMA": {"color": "#9900FF", "dash": (6, 4), "label": "RTMA Analysis"},
+    "Obs": {"color": "#000000", "dash": (6, 4), "label": "Observed"},
+    "URMA": {"color": "#660066", "dash": (6, 4), "label": "URMA Analysis"},
+    "RTMA": {"color": "#330033", "dash": (6, 4), "label": "RTMA Analysis"},
 }
 
 LabelSizeStrings = ["8", "10", "12", "14"]
@@ -307,7 +319,7 @@ class Tool(SmartScript.SmartScript):
 
         modsWithData = []
         for mod in self.MODELS:
-            maxvers = -1 if mod in ("Fcst", "ISC", "NBM", "NBMEXP") else -40
+            maxvers = -1 if mod in ("Fcst", "ISC", "NBM", "NBMEXP","WPCGuide") else -40
             element = reqElement
             self.element = reqElement
             tempoff = 0
@@ -324,7 +336,7 @@ class Tool(SmartScript.SmartScript):
                 if parmObj is None:
                     continue
 
-                if mod not in ("Fcst", "ISC", "NBM", "NBMEXP"):
+                if mod not in ("Fcst", "ISC", "NBM", "NBMEXP","WPCGuide"):
                     modTimeUnix = modID.modelTime().unixTime()
                 else:
                     modTimeUnix = self.perStart if self._gmtime().unixTime() > self.perStart else self._gmtime().unixTime()
@@ -548,6 +560,7 @@ class Tool(SmartScript.SmartScript):
             "MinRH": "RH",
             "TdMrn": "Td",
             "TdAft": "Td",
+            "QPF":"QPE06",
         }
         obsElement = obsElementMap.get(element, element)
         
@@ -1150,7 +1163,7 @@ class ToolDialog(AppDialog.AppDialog):
         self.obsMenu = tk.Menu(self.menuBar)
         self.menuBar.add_cascade(label="Observations", menu=self.obsMenu)
         self.obsSource = tk.StringVar(value="None")
-        for lbl, val in [("None", "None"), ("Obs (METAR)", "Obs"), ("URMA Analysis", "URMA"), ("RTMA Analysis", "RTMA")]:
+        for lbl, val in [("None", "None"), ("Obs", "Obs"), ("URMA Analysis", "URMA"), ("RTMA Analysis", "RTMA")]:
             self.obsMenu.add_radiobutton(label=lbl, value=val, variable=self.obsSource, command=self.setObsSource)
 
         self.ModelPopup = tk.Menu(self, tearoff=0)
