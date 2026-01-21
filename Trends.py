@@ -16,7 +16,6 @@
 # ----------------------------------------------------------------------------
 
 ModelConfig = [
-    # Fcst - Black (stands out as THE forecast)
     "Fcst           |#000000|X",
     "GFS            |#8B0000|GFS",      # Dark red
     "GFSBC          |#DC143C|GFS",      # Crimson
