@@ -695,10 +695,9 @@ class Tool(SmartScript.SmartScript):
             value = graphData[key][graphType]
             ymin, ymax = min(ymin, value), max(ymax, value)
         
-        if self.obsData:
-            for key in self.obsData.keys():
-                value = self.obsData[key][graphType]
-                ymin, ymax = min(ymin, value), max(ymax, value)
+        if self.obsValue is not None:
+            value = self.obsValue[graphType]
+            ymin, ymax = min(ymin, value), max(ymax, value)
         
         if ymax == ymin:
             ymax = ymin + 1.0
