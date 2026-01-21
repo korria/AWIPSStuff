@@ -55,6 +55,8 @@ ModelConfig = [
     "CONSMOS        |#bfbfbf|CONS",
     "BCCONSMOS      |#ffff7f|CONS",
     "SuperBlend     |#7F007f|CONS",
+    "WPCGuide       |#3f7fff|WPC",
+    "WPCGuideBC     |#7fbfff|WPC",
 ]
 
 # Observation database options - color and dash pattern for each source
@@ -139,8 +141,7 @@ class Tool(SmartScript.SmartScript):
 
         # Observation source settings
         self.obsSource = "None"
-        self.obsData = {}
-        self.obsFull = {}
+        self.obsValue = None
 
         self.readStatus()
         
@@ -505,6 +506,8 @@ class Tool(SmartScript.SmartScript):
         sys.stdout.flush()
         if self.obsSource != "None":
             self.fetchObsData(reqElement, eaFlat, FullTimeRange, accumVal)
+        else:
+            self.obsValue = None
 
         self.graphmin = 0.0 if accumVal == 1 else self.allmin
         self.drawGraph(self.outdata, self.outfull,
@@ -520,9 +523,8 @@ class Tool(SmartScript.SmartScript):
         return
 
     def fetchObsData(self, element, eaFlat, FullTimeRange, accumVal):
-        """Fetch observation data from Obs, URMA, or RTMA database."""
-        self.obsData = {}
-        self.obsFull = {}
+        """Fetch observation data from Obs, URMA, or RTMA database for the valid period."""
+        self.obsValue = None  # Single observation value for the period
         
         if self.obsSource == "None":
             return
@@ -534,15 +536,11 @@ class Tool(SmartScript.SmartScript):
             sys.stdout.flush()
             return
         
-        # Adjust end time if period extends into the future
-        obsEndTime = min(self.perEnd, currentTime)
-        
-        print("fetchObsData: source=%s, element=%s, period=%d-%d (obs end=%d)" % 
-              (self.obsSource, element, self.perStart, self.perEnd, obsEndTime))
+        print("fetchObsData: source=%s, element=%s, period=%d-%d" % 
+              (self.obsSource, element, self.perStart, self.perEnd))
         sys.stdout.flush()
         
         # Map forecast element names to observation element names
-        # Obs databases often store T instead of MaxT/MinT, Td instead of TdMrn/TdAft, etc.
         obsElementMap = {
             "MaxT": "T",
             "MinT": "T",
@@ -566,12 +564,13 @@ class Tool(SmartScript.SmartScript):
                 elementsToTry.append(element)
             
             foundSource = None
+            foundElement = None
             for tryElement in elementsToTry:
                 print("fetchObsData: trying %s / %s" % (tryElement, self.obsSource))
                 sys.stdout.flush()
                 if self.VU.checkFile(tryElement, self.obsSource):
                     foundSource = self.obsSource
-                    obsElement = tryElement
+                    foundElement = tryElement
                     print("fetchObsData: FOUND %s / %s" % (tryElement, foundSource))
                     sys.stdout.flush()
                     break
@@ -581,49 +580,56 @@ class Tool(SmartScript.SmartScript):
                 sys.stdout.flush()
                 return
             
-            obsCases = self.getModelCases(obsElement, foundSource, self.perStart, obsEndTime, accum=accumVal)
+            # Get observation cases using the same method as model data
+            obsCases = self.getModelCases(foundElement, foundSource, self.perStart, self.perEnd, accum=accumVal)
             if not obsCases:
-                print("fetchObsData: no cases found for %s / %s in time range %d-%d" % (obsElement, foundSource, self.perStart, obsEndTime))
+                print("fetchObsData: no cases found for %s / %s" % (foundElement, foundSource))
                 sys.stdout.flush()
                 return
             
             print("fetchObsData: found %d cases" % len(obsCases))
             sys.stdout.flush()
             
-            for casekey in sorted(obsCases.keys()):
+            # For observations, we want to combine all available data into one value
+            # Use the first (or most recent) case
+            casekeys = sorted(list(obsCases.keys()))
+            casekeys.reverse()  # Most recent first
+            
+            for casekey in casekeys:
                 (basestr, startstr, endstr) = casekey.split(",")
                 base = int(basestr)
                 recs = obsCases[casekey]
                 
-                obsGrid = self.VU.getVerGrids(foundSource, base, obsElement, self.perStart, obsEndTime, mode=modeVal, recList=recs)
+                print("fetchObsData: getting grid for base=%d with %d recs" % (base, len(recs)))
+                sys.stdout.flush()
+                
+                obsGrid = self.VU.getVerGrids(foundSource, base, foundElement, self.perStart, self.perEnd, mode=modeVal, recList=recs)
+                
                 if obsGrid is None:
+                    print("fetchObsData: no grid returned for base=%d" % base)
+                    sys.stdout.flush()
                     continue
+                    
                 if not isinstance(obsGrid, np.ndarray) and len(obsGrid) == 2:
                     obsGrid = obsGrid[0]
                 
-                if element in ("QPF", "SnowAmt"):
-                    totTime = sum(self.VU.fncEtime[rec] - self.VU.fncStime[rec] for rec in recs)
-                    fullFlag = 1 if totTime >= FullTimeRange.duration() else 0
-                else:
-                    fullFlag = 1
-                
-                obsKey = "OBS,%d" % base
+                # Get statistics for the observation
                 statsList = self.getStats(obsGrid, eaFlat)
-                self.obsData[obsKey] = copy.copy(statsList)
-                self.obsFull[obsKey] = fullFlag
+                self.obsValue = statsList  # Store the full stats tuple
+                
+                # Update y-axis range to include obs
                 self.allmax = max(self.allmax, statsList[1])
                 self.allmin = min(self.allmin, statsList[0])
-                print("fetchObsData: stored %s with value=%s" % (obsKey, statsList[2]))
+                
+                print("fetchObsData: got obs value - avg=%s, min=%s, max=%s" % (statsList[2], statsList[0], statsList[1]))
                 sys.stdout.flush()
+                break  # Only need one observation value
                 
         except Exception as e:
             print("Error fetching observation data: %s" % str(e))
             import traceback
             traceback.print_exc()
             sys.stdout.flush()
-        
-        print("fetchObsData: completed with %d obs points" % len(self.obsData))
-        sys.stdout.flush()
 
     def getStats(self, grid, areaFlat):
         flatGrid = np.ravel(grid)
@@ -794,7 +800,7 @@ class Tool(SmartScript.SmartScript):
                 self.dlg.histCanv.itemconfigure(mod, state=tk.HIDDEN)
 
         # Draw observation line
-        if self.obsSource != "None" and self.obsData:
+        if self.obsSource != "None" and self.obsValue is not None:
             self.drawObsLine(graphType, displayNum + 1)
 
         self.dlg.histCanv.lift("buttonArea")
@@ -805,37 +811,49 @@ class Tool(SmartScript.SmartScript):
         self.dlg.update_idletasks()
 
     def drawObsLine(self, graphType, labelPosition):
-        """Draw the observation data as a dashed line."""
-        print("drawObsLine: graphType=%d, obsData count=%d" % (graphType, len(self.obsData)))
+        """Draw the observation as a horizontal dashed line across the graph."""
+        print("drawObsLine: graphType=%d, obsValue=%s" % (graphType, self.obsValue is not None))
         sys.stdout.flush()
+        
+        if self.obsValue is None:
+            return
         
         obsConfig = ObsSourceConfig.get(self.obsSource, {})
         obsColor = obsConfig.get("color", "#00DD00")
         obsDash = obsConfig.get("dash", (6, 4))
         obsLabel = obsConfig.get("label", "Observed")
         
-        self.dlg.histCanv.create_text(self.dlg.curwidth - 115, 40 + (labelPosition * 13), anchor=tk.SW, text=obsLabel, justify=tk.LEFT, font="helvetica 12 italic", fill=obsColor, tags="ObsButton")
+        # Get the observation value for the current graph type (min/max/avg/percentile)
+        obsVal = self.obsValue[graphType]
         
-        obsKeys = sorted(list(self.obsData.keys()))
-        lastx, lasty, prevkey = -1, -1, "--"
+        # Draw horizontal line across the entire graph
+        (x1, y1) = self.graphcoord(self.xmin, obsVal)
+        (x2, y2) = self.graphcoord(self.xmax, obsVal)
         
-        for key in obsKeys:
-            parts = key.split(",")
-            if len(parts) < 2:
-                continue
-            base = int(parts[1])
-            value = self.obsData[key][graphType]
-            (sx, sy) = self.graphcoord(base, value)
+        # Clip to graph area
+        if y1 >= self.fbot and y1 <= self.ftop:
+            self.dlg.histCanv.create_line(
+                self.left, y1, self.right, y1,
+                fill=obsColor, width=2, dash=obsDash, tags="ObsLine"
+            )
             
-            if (sx >= self.left) and (sx <= self.right) and (sy >= self.fbot) and (sy <= self.ftop):
-                self.dlg.histCanv.create_oval(sx - 3, sy - 3, sx + 3, sy + 3, fill=obsColor, outline=obsColor, tags="ObsPoint")
-            
-            if lastx >= 0:
-                (x1, y1, x2, y2) = self.clipLine(self.left, self.fbot, self.right, self.ftop, lastx, lasty, sx, sy)
-                if x1 is not None:
-                    self.dlg.histCanv.create_line(x1, y1, x2, y2, fill=obsColor, width=2, dash=obsDash, tags="ObsLine")
-            
-            lastx, lasty, prevkey = sx, sy, key
+            # Add value label on right side
+            valText = self.valueFormat % obsVal
+            self.dlg.histCanv.create_text(
+                self.right + 5, y1,
+                anchor=tk.W, text=valText,
+                font="helvetica 10 bold", fill=obsColor, tags="ObsLabel"
+            )
+        
+        # Draw label in legend
+        self.dlg.histCanv.create_text(
+            self.dlg.curwidth - 115, 40 + (labelPosition * 13),
+            anchor=tk.SW, text=obsLabel,
+            font="helvetica 12 italic", fill=obsColor, tags="ObsButton"
+        )
+        
+        print("drawObsLine: drew line at y=%s (value=%s)" % (y1, obsVal))
+        sys.stdout.flush()
 
     def getPeriodString(self, perStart, perEnd):
         DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
