@@ -90,17 +90,13 @@ import BOIVerifyUtility
 import TimeRange
 
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QMenu, QMenuBar, QLabel, QComboBox, QCheckBox,
-    QDialog, QColorDialog, QGraphicsView, QGraphicsScene,
-    QGraphicsLineItem, QGraphicsTextItem, QGraphicsRectItem,
-    QGraphicsPolygonItem, QSizePolicy, QButtonGroup, QRadioButton,
-    QWidgetAction, QGroupBox
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QMenu, QMenuBar, QLabel, QComboBox,
+    QDialog, QColorDialog, QSizePolicy
 )
-from PySide6.QtCore import Qt, QPointF, QRectF, Signal, Slot, QTimer
+from PySide6.QtCore import Qt, QPointF, QRectF
 from PySide6.QtGui import (
-    QPen, QBrush, QColor, QFont, QPainter, QPolygonF, QAction,
-    QCursor, QPainterPath
+    QPen, QBrush, QColor, QFont, QPainter, QAction, QActionGroup
 )
 
 
