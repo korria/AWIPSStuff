@@ -580,50 +580,36 @@ class Tool(SmartScript.SmartScript):
                 sys.stdout.flush()
                 return
             
-            # Get observation cases using the same method as model data
-            obsCases = self.getModelCases(foundElement, foundSource, self.perStart, self.perEnd, accum=accumVal)
-            if not obsCases:
-                print("fetchObsData: no cases found for %s / %s" % (foundElement, foundSource))
+            # For observations, we don't pass recList - let getVerGrids find the data
+            # The observations are stored differently than forecasts
+            print("fetchObsData: getting observation grid for period %d-%d" % (self.perStart, self.perEnd))
+            sys.stdout.flush()
+            
+            try:
+                obsGrid = self.VU.getVerGrids(foundSource, 0, foundElement, self.perStart, self.perEnd, mode=modeVal)
+            except Exception as e:
+                print("fetchObsData: getVerGrids failed: %s" % str(e))
                 sys.stdout.flush()
                 return
             
-            print("fetchObsData: found %d cases" % len(obsCases))
+            if obsGrid is None:
+                print("fetchObsData: no grid returned")
+                sys.stdout.flush()
+                return
+                
+            if not isinstance(obsGrid, np.ndarray) and len(obsGrid) == 2:
+                obsGrid = obsGrid[0]
+            
+            # Get statistics for the observation
+            statsList = self.getStats(obsGrid, eaFlat)
+            self.obsValue = statsList  # Store the full stats tuple
+            
+            # Update y-axis range to include obs
+            self.allmax = max(self.allmax, statsList[1])
+            self.allmin = min(self.allmin, statsList[0])
+            
+            print("fetchObsData: got obs value - avg=%s, min=%s, max=%s" % (statsList[2], statsList[0], statsList[1]))
             sys.stdout.flush()
-            
-            # For observations, we want to combine all available data into one value
-            # Use the first (or most recent) case
-            casekeys = sorted(list(obsCases.keys()))
-            casekeys.reverse()  # Most recent first
-            
-            for casekey in casekeys:
-                (basestr, startstr, endstr) = casekey.split(",")
-                base = int(basestr)
-                recs = obsCases[casekey]
-                
-                print("fetchObsData: getting grid for base=%d with %d recs" % (base, len(recs)))
-                sys.stdout.flush()
-                
-                obsGrid = self.VU.getVerGrids(foundSource, base, foundElement, self.perStart, self.perEnd, mode=modeVal, recList=recs)
-                
-                if obsGrid is None:
-                    print("fetchObsData: no grid returned for base=%d" % base)
-                    sys.stdout.flush()
-                    continue
-                    
-                if not isinstance(obsGrid, np.ndarray) and len(obsGrid) == 2:
-                    obsGrid = obsGrid[0]
-                
-                # Get statistics for the observation
-                statsList = self.getStats(obsGrid, eaFlat)
-                self.obsValue = statsList  # Store the full stats tuple
-                
-                # Update y-axis range to include obs
-                self.allmax = max(self.allmax, statsList[1])
-                self.allmin = min(self.allmin, statsList[0])
-                
-                print("fetchObsData: got obs value - avg=%s, min=%s, max=%s" % (statsList[2], statsList[0], statsList[1]))
-                sys.stdout.flush()
-                break  # Only need one observation value
                 
         except Exception as e:
             print("Error fetching observation data: %s" % str(e))
