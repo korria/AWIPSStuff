@@ -89,15 +89,23 @@ import copy
 import BOIVerifyUtility
 import TimeRange
 
-from PySide6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QMenu, QMenuBar, QLabel, QComboBox,
-    QDialog, QColorDialog, QSizePolicy
-)
-from PySide6.QtCore import Qt, QPointF, QRectF
-from PySide6.QtGui import (
-    QPen, QBrush, QColor, QFont, QPainter, QAction, QActionGroup
-)
+# PySide6 imports are deferred to avoid conflicts with AWIPS Jep at module load time
+# They will be imported when the dialog is actually created
+PySide6_QtWidgets = None
+PySide6_QtCore = None
+PySide6_QtGui = None
+
+def _import_pyside6():
+    """Deferred import of PySide6 to avoid Jep/shiboken conflicts at module load."""
+    global PySide6_QtWidgets, PySide6_QtCore, PySide6_QtGui
+    if PySide6_QtWidgets is None:
+        from PySide6 import QtWidgets as PySide6_QtWidgets_mod
+        from PySide6 import QtCore as PySide6_QtCore_mod
+        from PySide6 import QtGui as PySide6_QtGui_mod
+        PySide6_QtWidgets = PySide6_QtWidgets_mod
+        PySide6_QtCore = PySide6_QtCore_mod
+        PySide6_QtGui = PySide6_QtGui_mod
+    return PySide6_QtWidgets, PySide6_QtCore, PySide6_QtGui
 
 
 class Tool(SmartScript.SmartScript):
@@ -169,10 +177,13 @@ class Tool(SmartScript.SmartScript):
         self.cursorReadout = 0
 
     def preProcessGrid(self):
+        # Import PySide6 at runtime to avoid Jep conflicts
+        QtWidgets, QtCore, QtGui = _import_pyside6()
+        
         # Create the PySide6 application if needed
-        self.app = QApplication.instance()
+        self.app = QtWidgets.QApplication.instance()
         if self.app is None:
-            self.app = QApplication(sys.argv)
+            self.app = QtWidgets.QApplication(sys.argv)
         
         self.dlg = TrendDialog(
             title="Model Trends",
@@ -190,6 +201,8 @@ class Tool(SmartScript.SmartScript):
         return
 
     def getStuff(self, buttonName):
+        QtWidgets, QtCore, QtGui = _import_pyside6()
+        
         if buttonName == "Close":
             self.saveStatus()
             return
@@ -218,7 +231,7 @@ class Tool(SmartScript.SmartScript):
         self.dlg.updateButton.setText("WORKING")
         self.dlg.updateButton.setEnabled(False)
         self.dlg.updateButton.setStyleSheet("background-color: red; color: white;")
-        QApplication.processEvents()
+        QtWidgets.QApplication.processEvents()
 
         # Get the current editArea
         editArea = self.getActiveEditArea()
@@ -573,7 +586,7 @@ class Tool(SmartScript.SmartScript):
                     colors=self.COLORS, numpts=self.numpts
                 )
 
-            QApplication.processEvents()
+            QtWidgets.QApplication.processEvents()
 
         # Fetch observation data if enabled
         if self.showObs and self.obsSource != "None":
@@ -1124,687 +1137,721 @@ class Tool(SmartScript.SmartScript):
         return nf * a
 
 
-class GraphWidget(QWidget):
-    """Custom widget for drawing the trend graph using QPainter."""
+
+# Cache for dynamically created UI classes
+_GraphWidget = None
+_TrendDialog = None
+
+
+def _create_ui_classes():
+    """Create UI classes after PySide6 is imported to avoid Jep conflicts."""
+    global _GraphWidget, _TrendDialog
     
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setMinimumSize(800, 600)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setMouseTracking(True)
+    if _GraphWidget is not None and _TrendDialog is not None:
+        return _GraphWidget, _TrendDialog
+    
+    # Import PySide6
+    QtWidgets, QtCore, QtGui = _import_pyside6()
+    
+    class GraphWidget(QtWidgets.QWidget):
+        """Custom widget for drawing the trend graph using QPainter."""
         
-        # Graph coordinate system
-        self.xmin = 0
-        self.xmax = 1
-        self.ymin = 0
-        self.ymax = 1
-        self.xmult = 1
-        self.xoff = 0
-        self.ymult = 1
-        self.yoff = 0
-        
-        # Margins
-        self.left = 60
-        self.right = 165
-        self.top = 70
-        self.bottom = 70
-        
-        # Drawing lists
-        self.lines = []
-        self.points = []
-        self.texts = []
-        self.labels = []
-        self.axes_items = []
-        self.obs_items = []
-        
-        # Callbacks
-        self.model_click_callback = None
-        self.model_right_click_callback = None
-        self.model_middle_click_callback = None
-        
-        # Model label positions for click detection
-        self.model_label_rects = {}
-        
-        # Cursor readout
-        self.show_readout = False
-        self.readout_pos = QPointF(0, 0)
-        self.readout_value = ""
-        self.valueFormat = "%.1f"
-        
-        # Time conversion function
-        self._gmtime = None
-        
-    def setValueFormat(self, fmt):
-        self.valueFormat = fmt
-        
-    def setGraphCoords(self, xmin, xmax, ymin, ymax):
-        self.xmin = xmin
-        self.xmax = xmax
-        self.ymin = ymin
-        self.ymax = ymax
-        
-        width = self.width()
-        height = self.height()
-        
-        sxmin = self.left
-        sxmax = width - self.right
-        symin = self.bottom
-        symax = height - self.top
-        
-        if xmax != xmin:
-            self.xmult = (sxmax - sxmin) / (xmax - xmin)
-        else:
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.setMinimumSize(800, 600)
+            self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+            self.setMouseTracking(True)
+            
+            # Graph coordinate system
+            self.xmin = 0
+            self.xmax = 1
+            self.ymin = 0
+            self.ymax = 1
             self.xmult = 1
-        self.xoff = sxmin
-        
-        if ymax != ymin:
-            self.ymult = (symax - symin) / (ymax - ymin)
-        else:
+            self.xoff = 0
             self.ymult = 1
-        self.yoff = symin
-        self.windowHeight = height
-        
-    def graphcoord(self, x, y):
-        sx = ((x - self.xmin) * self.xmult) + self.xoff
-        sy = self.windowHeight - (((y - self.ymin) * self.ymult) + self.yoff)
-        return sx, sy
-    
-    def valcoord(self, sx, sy):
-        x = ((sx - self.xoff) / self.xmult) + self.xmin
-        y = ((-sy + self.windowHeight - self.yoff) / self.ymult) + self.ymin
-        return x, y
-    
-    def pointInGraph(self, sx, sy):
-        width = self.width()
-        height = self.height()
-        return (sx >= self.left and sx <= width - self.right and
-                sy >= self.top and sy <= height - self.bottom)
-    
-    def clear(self):
-        self.lines = []
-        self.points = []
-        self.texts = []
-        self.labels = []
-        self.axes_items = []
-        self.obs_items = []
-        self.model_label_rects = {}
-        
-    def drawAxes(self, xmin, xmax, ymin, ymax, ytick, label, gmtime_func):
-        self._gmtime = gmtime_func
-        width = self.width()
-        height = self.height()
-        
-        # Draw box around graph
-        (nx, ny) = self.graphcoord(xmin, ymin)
-        (xx, xy) = self.graphcoord(xmax, ymax)
-        self.axes_items.append(('rect', nx, xy, xx - nx, ny - xy, 'black'))
-        
-        # Y-axis ticks and labels
-        numticks = int((ymax - ymin) / ytick) + 1
-        labeldigits = max(-math.floor(math.log10(ytick)) if ytick > 0 else 0, 0)
-        
-        for i in range(numticks):
-            y = ymin + (i * ytick)
-            (tx, ty) = self.graphcoord(xmin, y)
-            (tx2, ty2) = self.graphcoord(xmax, y)
+            self.yoff = 0
             
-            # Ticks on left
-            self.axes_items.append(('line', tx - 3, ty, tx + 3, ty, 'black', 1))
-            # Ticks on right  
-            self.axes_items.append(('line', tx2 - 3, ty2, tx2 + 3, ty2, 'black', 1))
+            # Margins
+            self.left = 60
+            self.right = 165
+            self.top = 70
+            self.bottom = 70
             
-            # Labels
-            if i % 3 == 0:
-                if labeldigits == 0:
-                    labelstring = "%d" % y
-                else:
-                    fmt = "%%.%df" % labeldigits
-                    labelstring = fmt % y
-                self.axes_items.append(('text', tx - 7, ty, labelstring, 'black', 'right'))
-                self.axes_items.append(('text', tx2 + 7, ty2, labelstring, 'black', 'left'))
-        
-        # X-axis ticks and labels (time-based)
-        xtick = 6 * 60 * 60  # 6 hours
-        numticks = int((xmax - xmin) / xtick) + 1
-        
-        for i in range(numticks):
-            x = xmin + (i * xtick)
-            (tx, ty) = self.graphcoord(x, ymin)
-            (tx2, ty2) = self.graphcoord(x, ymax)
+            # Drawing lists
+            self.lines = []
+            self.points = []
+            self.texts = []
+            self.labels = []
+            self.axes_items = []
+            self.obs_items = []
             
-            if self._gmtime:
-                (xyea, xmon, xday, xhou, xmin_t, xsec, xwda, xyda, xdst) = self._gmtime(x).timetuple()
-                
-                # Longer tick at midnight
-                ticklen = 5 if xhou == 0 else 3
-                self.axes_items.append(('line', tx, ty - ticklen, tx, ty + ticklen, 'black', 1))
-                self.axes_items.append(('line', tx2, ty2 - ticklen, tx2, ty2 + ticklen, 'black', 1))
-                
-                # Grid line at midnight
-                if xhou == 0 and i > 0 and i < numticks - 1:
-                    self.axes_items.append(('line', tx, ty, tx, ty2, '#A0A0A0', 1))
-                
-                # Date label at noon
-                if xhou == 12:
-                    labelstring = "%2.2d/%2.2d" % (xmon, xday)
-                    self.axes_items.append(('text', tx, ty + 15, labelstring, 'black', 'center'))
-        
-        # Y-axis label (vertical)
-        (xdum, midy) = self.graphcoord(xmin, (ymin + ymax) / 2.0)
-        self.axes_items.append(('vtext', nx - 40, midy, label, 'black'))
-        self.axes_items.append(('vtext', xx + 40, midy, label, 'black'))
-        
-        # X-axis label
-        (midx, ydum) = self.graphcoord((xmax + xmin) / 2.0, 0)
-        self.axes_items.append(('text', midx, ny + 35, "Model Run", 'black', 'center'))
-        
-    def drawTitle(self, title, graphTypeStr, numpts, periodString):
-        width = self.width()
-        xmid = width / 2
-        
-        self.texts.append(('title', xmid, 10, title, 'black', 24, True))
-        
-        if numpts > 1:
-            pointText = "(%s of %d points)" % (graphTypeStr, numpts)
-            self.texts.append(('subtitle', xmid, 36, pointText, 'black', 10, False))
-            yoff = 12
-        else:
-            yoff = 0
-        
-        self.texts.append(('period', xmid, 36 + yoff, periodString, 'black', 12, False))
-        
-    def drawModelLabel(self, mod, displayNum, color, visible, click_cb, middle_cb, right_cb):
-        width = self.width()
-        x = width - 115
-        y = 50 + (displayNum * 16)
-        
-        textColor = color if visible else 'grey'
-        self.labels.append((mod, x, y, textColor))
-        
-        # Store click area
-        self.model_label_rects[mod] = QRectF(x, y - 8, 100, 16)
-        
-        # Store callbacks
-        self.model_click_callback = click_cb
-        self.model_middle_click_callback = middle_cb
-        self.model_right_click_callback = right_cb
-        
-    def drawDataPoint(self, sx, sy, color, tag, label_text=None, font_size=10):
-        self.points.append((sx, sy, color, tag, label_text, font_size))
-        
-    def drawLine(self, x1, y1, x2, y2, color, width, solid, tag, dash_pattern=None):
-        # Clip line to graph area
-        w = self.width()
-        h = self.height()
-        left = self.left
-        right = w - self.right
-        top = self.top
-        bottom = h - self.bottom
-        
-        clipped = self.clipLine(left, top, right, bottom, x1, y1, x2, y2)
-        if clipped[0] is not None:
-            self.lines.append((clipped[0], clipped[1], clipped[2], clipped[3], 
-                              color, width, solid, tag, dash_pattern))
-    
-    def drawObsLabel(self, label, color):
-        """Draw observation source label in the legend area."""
-        width = self.width()
-        x = width - 115
-        # Find the next available y position after model labels
-        y = 50 + (len(self.labels) * 16) + 20
-        self.obs_items.append(('label', x, y, label, color))
-    
-    def clipLine(self, left, top, right, bottom, x1, y1, x2, y2):
-        """Liang-Barsky line clipping algorithm."""
-        dx = x2 - x1
-        dy = y2 - y1
-        dt0, dt1 = 0, 1
-
-        checks = ((-dx, x1 - left),
-                  (dx, right - x1),
-                  (-dy, y1 - top),
-                  (dy, bottom - y1))
-
-        for p, q in checks:
-            if p == 0:
-                if q < 0:
-                    return None, None, None, None
-                continue
-            dt = q / (p * 1.0)
-            if p < 0:
-                if dt > dt1:
-                    return None, None, None, None
-                dt0 = max(dt0, dt)
-            else:
-                if dt < dt0:
-                    return None, None, None, None
-                dt1 = min(dt1, dt)
-        if dt0 > 0:
-            x1 += dt0 * dx
-            y1 += dt0 * dy
-        if dt1 < 1:
-            x2 = x1 + dt1 * dx
-            y2 = y1 + dt1 * dy
-        return x1, y1, x2, y2
-    
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        
-        # White background
-        painter.fillRect(self.rect(), Qt.white)
-        
-        # Draw axes items
-        for item in self.axes_items:
-            if item[0] == 'rect':
-                _, x, y, w, h, color = item
-                painter.setPen(QPen(QColor(color), 1))
-                painter.drawRect(int(x), int(y), int(w), int(h))
-            elif item[0] == 'line':
-                _, x1, y1, x2, y2, color, width = item
-                painter.setPen(QPen(QColor(color), width))
-                painter.drawLine(int(x1), int(y1), int(x2), int(y2))
-            elif item[0] == 'text':
-                _, x, y, text, color, align = item
-                painter.setPen(QColor(color))
-                font = QFont("Helvetica", 10)
-                painter.setFont(font)
-                fm = painter.fontMetrics()
-                tw = fm.horizontalAdvance(text)
-                if align == 'right':
-                    painter.drawText(int(x - tw), int(y + 4), text)
-                elif align == 'center':
-                    painter.drawText(int(x - tw / 2), int(y + 4), text)
-                else:
-                    painter.drawText(int(x), int(y + 4), text)
-            elif item[0] == 'vtext':
-                _, x, y, text, color = item
-                painter.save()
-                painter.translate(x, y)
-                painter.rotate(-90)
-                painter.setPen(QColor(color))
-                font = QFont("Helvetica", 10)
-                painter.setFont(font)
-                fm = painter.fontMetrics()
-                tw = fm.horizontalAdvance(text)
-                painter.drawText(int(-tw / 2), 0, text)
-                painter.restore()
-        
-        # Draw lines
-        for line in self.lines:
-            x1, y1, x2, y2, color, width, solid, tag, dash_pattern = line
-            pen = QPen(QColor(color), width)
-            if not solid:
-                if dash_pattern:
-                    pen.setDashPattern(dash_pattern)
-                else:
-                    pen.setStyle(Qt.DashLine)
-            painter.setPen(pen)
-            painter.drawLine(int(x1), int(y1), int(x2), int(y2))
-        
-        # Draw points
-        for point in self.points:
-            sx, sy, color, tag, label_text, font_size = point
-            painter.setPen(QPen(QColor(color), 1))
-            painter.setBrush(QBrush(QColor(color)))
-            painter.drawRect(int(sx - 2), int(sy - 2), 4, 4)
+            # Callbacks
+            self.model_click_callback = None
+            self.model_right_click_callback = None
+            self.model_middle_click_callback = None
             
-            if label_text:
-                font = QFont("Helvetica", font_size)
-                painter.setFont(font)
-                painter.drawText(int(sx), int(sy - 5), label_text)
-        
-        # Draw titles
-        for text in self.texts:
-            ttype, x, y, txt, color, size, bold = text
-            font = QFont("Helvetica", size)
-            if bold:
-                font.setBold(True)
-            painter.setFont(font)
-            painter.setPen(QColor(color))
-            fm = painter.fontMetrics()
-            tw = fm.horizontalAdvance(txt)
-            painter.drawText(int(x - tw / 2), int(y + size), txt)
-        
-        # Draw model labels
-        for label in self.labels:
-            mod, x, y, color = label
-            font = QFont("Helvetica", 11)
-            painter.setFont(font)
-            painter.setPen(QColor(color))
-            painter.drawText(int(x), int(y), mod)
-        
-        # Draw observation items
-        for item in self.obs_items:
-            if item[0] == 'label':
-                _, x, y, text, color = item
-                font = QFont("Helvetica", 11)
-                font.setItalic(True)
-                painter.setFont(font)
-                painter.setPen(QColor(color))
-                # Draw a dashed line sample
-                pen = QPen(QColor(color), 2)
-                pen.setStyle(Qt.DashLine)
-                painter.setPen(pen)
-                painter.drawLine(int(x - 30), int(y - 4), int(x - 5), int(y - 4))
-                # Draw label
-                painter.setPen(QColor(color))
-                painter.drawText(int(x), int(y), text)
-        
-        # Draw cursor readout
-        if self.show_readout:
-            font = QFont("Helvetica", 12)
-            font.setBold(True)
-            painter.setFont(font)
-            painter.setPen(QColor('black'))
-            painter.drawText(int(self.readout_pos.x() + 5), int(self.readout_pos.y() - 5), self.readout_value)
-        
-    def mousePressEvent(self, event):
-        pos = event.position()
-        
-        # Check if click is on a model label
-        for mod, rect in self.model_label_rects.items():
-            if rect.contains(pos):
-                if event.button() == Qt.LeftButton and self.model_click_callback:
-                    self.model_click_callback(mod)
-                elif event.button() == Qt.MiddleButton and self.model_middle_click_callback:
-                    self.model_middle_click_callback(mod)
-                elif event.button() == Qt.RightButton and self.model_right_click_callback:
-                    self.model_right_click_callback(mod, event.globalPosition().toPoint())
-                return
-        
-        # Check if click is in graph area
-        if self.pointInGraph(pos.x(), pos.y()):
-            if event.button() == Qt.LeftButton:
-                self.show_readout = True
-                self.readout_pos = pos
-                (x, y) = self.valcoord(pos.x(), pos.y())
-                self.readout_value = self.valueFormat % y
-                self.update()
-    
-    def mouseMoveEvent(self, event):
-        pos = event.position()
-        
-        # Update cursor based on position
-        in_label = False
-        for mod, rect in self.model_label_rects.items():
-            if rect.contains(pos):
-                self.setCursor(Qt.PointingHandCursor)
-                in_label = True
-                break
-        
-        if not in_label:
-            if self.pointInGraph(pos.x(), pos.y()):
-                self.setCursor(Qt.CrossCursor)
-            else:
-                self.setCursor(Qt.ArrowCursor)
-        
-        # Update readout if showing
-        if self.show_readout:
-            if self.pointInGraph(pos.x(), pos.y()):
-                self.readout_pos = pos
-                (x, y) = self.valcoord(pos.x(), pos.y())
-                self.readout_value = self.valueFormat % y
-            else:
-                self.show_readout = False
-            self.update()
-    
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
+            # Model label positions for click detection
+            self.model_label_rects = {}
+            
+            # Cursor readout
             self.show_readout = False
-            self.update()
-    
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        # Recalculate graph coordinates on resize
-        self.setGraphCoords(self.xmin, self.xmax, self.ymin, self.ymax)
+            self.readout_pos = QtCore.QPointF(0, 0)
+            self.readout_value = ""
+            self.valueFormat = "%.1f"
+            
+            # Time conversion function
+            self._gmtime = None
+            
+        def setValueFormat(self, fmt):
+            self.valueFormat = fmt
+            
+        def setGraphCoords(self, xmin, xmax, ymin, ymax):
+            self.xmin = xmin
+            self.xmax = xmax
+            self.ymin = ymin
+            self.ymax = ymax
+            
+            width = self.width()
+            height = self.height()
+            
+            sxmin = self.left
+            sxmax = width - self.right
+            symin = self.bottom
+            symax = height - self.top
+            
+            if xmax != xmin:
+                self.xmult = (sxmax - sxmin) / (xmax - xmin)
+            else:
+                self.xmult = 1
+            self.xoff = sxmin
+            
+            if ymax != ymin:
+                self.ymult = (symax - symin) / (ymax - ymin)
+            else:
+                self.ymult = 1
+            self.yoff = symin
+            self.windowHeight = height
+            
+        def graphcoord(self, x, y):
+            sx = ((x - self.xmin) * self.xmult) + self.xoff
+            sy = self.windowHeight - (((y - self.ymin) * self.ymult) + self.yoff)
+            return sx, sy
+        
+        def valcoord(self, sx, sy):
+            x = ((sx - self.xoff) / self.xmult) + self.xmin
+            y = ((-sy + self.windowHeight - self.yoff) / self.ymult) + self.ymin
+            return x, y
+        
+        def pointInGraph(self, sx, sy):
+            width = self.width()
+            height = self.height()
+            return (sx >= self.left and sx <= width - self.right and
+                    sy >= self.top and sy <= height - self.bottom)
+        
+        def clear(self):
+            self.lines = []
+            self.points = []
+            self.texts = []
+            self.labels = []
+            self.axes_items = []
+            self.obs_items = []
+            self.model_label_rects = {}
+            
+        def drawAxes(self, xmin, xmax, ymin, ymax, ytick, label, gmtime_func):
+            self._gmtime = gmtime_func
+            width = self.width()
+            height = self.height()
+            
+            # Draw box around graph
+            (nx, ny) = self.graphcoord(xmin, ymin)
+            (xx, xy) = self.graphcoord(xmax, ymax)
+            self.axes_items.append(('rect', nx, xy, xx - nx, ny - xy, 'black'))
+            
+            # Y-axis ticks and labels
+            numticks = int((ymax - ymin) / ytick) + 1
+            labeldigits = max(-math.floor(math.log10(ytick)) if ytick > 0 else 0, 0)
+            
+            for i in range(numticks):
+                y = ymin + (i * ytick)
+                (tx, ty) = self.graphcoord(xmin, y)
+                (tx2, ty2) = self.graphcoord(xmax, y)
+                
+                # Ticks on left
+                self.axes_items.append(('line', tx - 3, ty, tx + 3, ty, 'black', 1))
+                # Ticks on right  
+                self.axes_items.append(('line', tx2 - 3, ty2, tx2 + 3, ty2, 'black', 1))
+                
+                # Labels
+                if i % 3 == 0:
+                    if labeldigits == 0:
+                        labelstring = "%d" % y
+                    else:
+                        fmt = "%%.%df" % labeldigits
+                        labelstring = fmt % y
+                    self.axes_items.append(('text', tx - 7, ty, labelstring, 'black', 'right'))
+                    self.axes_items.append(('text', tx2 + 7, ty2, labelstring, 'black', 'left'))
+            
+            # X-axis ticks and labels (time-based)
+            xtick = 6 * 60 * 60  # 6 hours
+            numticks = int((xmax - xmin) / xtick) + 1
+            
+            for i in range(numticks):
+                x = xmin + (i * xtick)
+                (tx, ty) = self.graphcoord(x, ymin)
+                (tx2, ty2) = self.graphcoord(x, ymax)
+                
+                if self._gmtime:
+                    (xyea, xmon, xday, xhou, xmin_t, xsec, xwda, xyda, xdst) = self._gmtime(x).timetuple()
+                    
+                    # Longer tick at midnight
+                    ticklen = 5 if xhou == 0 else 3
+                    self.axes_items.append(('line', tx, ty - ticklen, tx, ty + ticklen, 'black', 1))
+                    self.axes_items.append(('line', tx2, ty2 - ticklen, tx2, ty2 + ticklen, 'black', 1))
+                    
+                    # Grid line at midnight
+                    if xhou == 0 and i > 0 and i < numticks - 1:
+                        self.axes_items.append(('line', tx, ty, tx, ty2, '#A0A0A0', 1))
+                    
+                    # Date label at noon
+                    if xhou == 12:
+                        labelstring = "%2.2d/%2.2d" % (xmon, xday)
+                        self.axes_items.append(('text', tx, ty + 15, labelstring, 'black', 'center'))
+            
+            # Y-axis label (vertical)
+            (xdum, midy) = self.graphcoord(xmin, (ymin + ymax) / 2.0)
+            self.axes_items.append(('vtext', nx - 40, midy, label, 'black'))
+            self.axes_items.append(('vtext', xx + 40, midy, label, 'black'))
+            
+            # X-axis label
+            (midx, ydum) = self.graphcoord((xmax + xmin) / 2.0, 0)
+            self.axes_items.append(('text', midx, ny + 35, "Model Run", 'black', 'center'))
+            
+        def drawTitle(self, title, graphTypeStr, numpts, periodString):
+            width = self.width()
+            xmid = width / 2
+            
+            self.texts.append(('title', xmid, 10, title, 'black', 24, True))
+            
+            if numpts > 1:
+                pointText = "(%s of %d points)" % (graphTypeStr, numpts)
+                self.texts.append(('subtitle', xmid, 36, pointText, 'black', 10, False))
+                yoff = 12
+            else:
+                yoff = 0
+            
+            self.texts.append(('period', xmid, 36 + yoff, periodString, 'black', 12, False))
+            
+        def drawModelLabel(self, mod, displayNum, color, visible, click_cb, middle_cb, right_cb):
+            width = self.width()
+            x = width - 115
+            y = 50 + (displayNum * 16)
+            
+            textColor = color if visible else 'grey'
+            self.labels.append((mod, x, y, textColor))
+            
+            # Store click area
+            self.model_label_rects[mod] = QtCore.QRectF(x, y - 8, 100, 16)
+            
+            # Store callbacks
+            self.model_click_callback = click_cb
+            self.model_middle_click_callback = middle_cb
+            self.model_right_click_callback = right_cb
+            
+        def drawDataPoint(self, sx, sy, color, tag, label_text=None, font_size=10):
+            self.points.append((sx, sy, color, tag, label_text, font_size))
+            
+        def drawLine(self, x1, y1, x2, y2, color, width, solid, tag, dash_pattern=None):
+            # Clip line to graph area
+            w = self.width()
+            h = self.height()
+            left = self.left
+            right = w - self.right
+            top = self.top
+            bottom = h - self.bottom
+            
+            clipped = self.clipLine(left, top, right, bottom, x1, y1, x2, y2)
+            if clipped[0] is not None:
+                self.lines.append((clipped[0], clipped[1], clipped[2], clipped[3], 
+                                  color, width, solid, tag, dash_pattern))
+        
+        def drawObsLabel(self, label, color):
+            """Draw observation source label in the legend area."""
+            width = self.width()
+            x = width - 115
+            # Find the next available y position after model labels
+            y = 50 + (len(self.labels) * 16) + 20
+            self.obs_items.append(('label', x, y, label, color))
+        
+        def clipLine(self, left, top, right, bottom, x1, y1, x2, y2):
+            """Liang-Barsky line clipping algorithm."""
+            dx = x2 - x1
+            dy = y2 - y1
+            dt0, dt1 = 0, 1
+
+            checks = ((-dx, x1 - left),
+                      (dx, right - x1),
+                      (-dy, y1 - top),
+                      (dy, bottom - y1))
+
+            for p, q in checks:
+                if p == 0:
+                    if q < 0:
+                        return None, None, None, None
+                    continue
+                dt = q / (p * 1.0)
+                if p < 0:
+                    if dt > dt1:
+                        return None, None, None, None
+                    dt0 = max(dt0, dt)
+                else:
+                    if dt < dt0:
+                        return None, None, None, None
+                    dt1 = min(dt1, dt)
+            if dt0 > 0:
+                x1 += dt0 * dx
+                y1 += dt0 * dy
+            if dt1 < 1:
+                x2 = x1 + dt1 * dx
+                y2 = y1 + dt1 * dy
+            return x1, y1, x2, y2
+        
+        def paintEvent(self, event):
+            painter = QtGui.QPainter(self)
+            painter.setRenderHint(QtGui.QPainter.Antialiasing)
+            
+            # White background
+            painter.fillRect(self.rect(), QtCore.Qt.white)
+            
+            # Draw axes items
+            for item in self.axes_items:
+                if item[0] == 'rect':
+                    _, x, y, w, h, color = item
+                    painter.setPen(QtGui.QPen(QtGui.QColor(color), 1))
+                    painter.drawRect(int(x), int(y), int(w), int(h))
+                elif item[0] == 'line':
+                    _, x1, y1, x2, y2, color, width = item
+                    painter.setPen(QtGui.QPen(QtGui.QColor(color), width))
+                    painter.drawLine(int(x1), int(y1), int(x2), int(y2))
+                elif item[0] == 'text':
+                    _, x, y, text, color, align = item
+                    painter.setPen(QtGui.QColor(color))
+                    font = QtGui.QFont("Helvetica", 10)
+                    painter.setFont(font)
+                    fm = painter.fontMetrics()
+                    tw = fm.horizontalAdvance(text)
+                    if align == 'right':
+                        painter.drawText(int(x - tw), int(y + 4), text)
+                    elif align == 'center':
+                        painter.drawText(int(x - tw / 2), int(y + 4), text)
+                    else:
+                        painter.drawText(int(x), int(y + 4), text)
+                elif item[0] == 'vtext':
+                    _, x, y, text, color = item
+                    painter.save()
+                    painter.translate(x, y)
+                    painter.rotate(-90)
+                    painter.setPen(QtGui.QColor(color))
+                    font = QtGui.QFont("Helvetica", 10)
+                    painter.setFont(font)
+                    fm = painter.fontMetrics()
+                    tw = fm.horizontalAdvance(text)
+                    painter.drawText(int(-tw / 2), 0, text)
+                    painter.restore()
+            
+            # Draw lines
+            for line in self.lines:
+                x1, y1, x2, y2, color, width, solid, tag, dash_pattern = line
+                pen = QtGui.QPen(QtGui.QColor(color), width)
+                if not solid:
+                    if dash_pattern:
+                        pen.setDashPattern(dash_pattern)
+                    else:
+                        pen.setStyle(QtCore.Qt.DashLine)
+                painter.setPen(pen)
+                painter.drawLine(int(x1), int(y1), int(x2), int(y2))
+            
+            # Draw points
+            for point in self.points:
+                sx, sy, color, tag, label_text, font_size = point
+                painter.setPen(QtGui.QPen(QtGui.QColor(color), 1))
+                painter.setBrush(QtGui.QBrush(QtGui.QColor(color)))
+                painter.drawRect(int(sx - 2), int(sy - 2), 4, 4)
+                
+                if label_text:
+                    font = QtGui.QFont("Helvetica", font_size)
+                    painter.setFont(font)
+                    painter.drawText(int(sx), int(sy - 5), label_text)
+            
+            # Draw titles
+            for text in self.texts:
+                ttype, x, y, txt, color, size, bold = text
+                font = QtGui.QFont("Helvetica", size)
+                if bold:
+                    font.setBold(True)
+                painter.setFont(font)
+                painter.setPen(QtGui.QColor(color))
+                fm = painter.fontMetrics()
+                tw = fm.horizontalAdvance(txt)
+                painter.drawText(int(x - tw / 2), int(y + size), txt)
+            
+            # Draw model labels
+            for label in self.labels:
+                mod, x, y, color = label
+                font = QtGui.QFont("Helvetica", 11)
+                painter.setFont(font)
+                painter.setPen(QtGui.QColor(color))
+                painter.drawText(int(x), int(y), mod)
+            
+            # Draw observation items
+            for item in self.obs_items:
+                if item[0] == 'label':
+                    _, x, y, text, color = item
+                    font = QtGui.QFont("Helvetica", 11)
+                    font.setItalic(True)
+                    painter.setFont(font)
+                    painter.setPen(QtGui.QColor(color))
+                    # Draw a dashed line sample
+                    pen = QtGui.QPen(QtGui.QColor(color), 2)
+                    pen.setStyle(QtCore.Qt.DashLine)
+                    painter.setPen(pen)
+                    painter.drawLine(int(x - 30), int(y - 4), int(x - 5), int(y - 4))
+                    # Draw label
+                    painter.setPen(QtGui.QColor(color))
+                    painter.drawText(int(x), int(y), text)
+            
+            # Draw cursor readout
+            if self.show_readout:
+                font = QtGui.QFont("Helvetica", 12)
+                font.setBold(True)
+                painter.setFont(font)
+                painter.setPen(QtGui.QColor('black'))
+                painter.drawText(int(self.readout_pos.x() + 5), int(self.readout_pos.y() - 5), self.readout_value)
+            
+        def mousePressEvent(self, event):
+            pos = event.position()
+            
+            # Check if click is on a model label
+            for mod, rect in self.model_label_rects.items():
+                if rect.contains(pos):
+                    if event.button() == QtCore.Qt.LeftButton and self.model_click_callback:
+                        self.model_click_callback(mod)
+                    elif event.button() == QtCore.Qt.MiddleButton and self.model_middle_click_callback:
+                        self.model_middle_click_callback(mod)
+                    elif event.button() == QtCore.Qt.RightButton and self.model_right_click_callback:
+                        self.model_right_click_callback(mod, event.globalPosition().toPoint())
+                    return
+            
+            # Check if click is in graph area
+            if self.pointInGraph(pos.x(), pos.y()):
+                if event.button() == QtCore.Qt.LeftButton:
+                    self.show_readout = True
+                    self.readout_pos = pos
+                    (x, y) = self.valcoord(pos.x(), pos.y())
+                    self.readout_value = self.valueFormat % y
+                    self.update()
+        
+        def mouseMoveEvent(self, event):
+            pos = event.position()
+            
+            # Update cursor based on position
+            in_label = False
+            for mod, rect in self.model_label_rects.items():
+                if rect.contains(pos):
+                    self.setCursor(QtCore.Qt.PointingHandCursor)
+                    in_label = True
+                    break
+            
+            if not in_label:
+                if self.pointInGraph(pos.x(), pos.y()):
+                    self.setCursor(QtCore.Qt.CrossCursor)
+                else:
+                    self.setCursor(QtCore.Qt.ArrowCursor)
+            
+            # Update readout if showing
+            if self.show_readout:
+                if self.pointInGraph(pos.x(), pos.y()):
+                    self.readout_pos = pos
+                    (x, y) = self.valcoord(pos.x(), pos.y())
+                    self.readout_value = self.valueFormat % y
+                else:
+                    self.show_readout = False
+                self.update()
+        
+        def mouseReleaseEvent(self, event):
+            if event.button() == QtCore.Qt.LeftButton:
+                self.show_readout = False
+                self.update()
+        
+        def resizeEvent(self, event):
+            super().resizeEvent(event)
+            # Recalculate graph coordinates on resize
+            self.setGraphCoords(self.xmin, self.xmax, self.ymin, self.ymax)
 
 
-class TrendDialog(QDialog):
-    """Main dialog window for the Trends tool using PySide6."""
-    
-    def __init__(self, title="Model Trends", callback_method=None, popup_callback=None, parent_tool=None):
-        super().__init__()
+    class TrendDialog(QtWidgets.QDialog):
+        """Main dialog window for the Trends tool using PySide6."""
         
-        self.setWindowTitle(title)
-        self.setMinimumSize(1000, 700)
-        self.resize(1200, 800)
-        
-        self.callback_method = callback_method
-        self.popup_callback = popup_callback
-        self.parent_tool = parent_tool
-        
-        # Graph type (0=Min, 1=Max, 2=Avg, etc.)
-        self.graphType = 2
-        
-        # Popup menu state
-        self.currentPopupModel = ""
-        self.popupLineWidth = 1
-        self.popupLabelSize = 1
-        self.timeSplitX = 0
-        
-        self.setupUI()
-        
-    def setupUI(self):
-        layout = QVBoxLayout(self)
-        
-        # Menu bar
-        menuBar = QMenuBar(self)
-        layout.setMenuBar(menuBar)
-        
-        # Graph menu
-        graphMenu = menuBar.addMenu("Graph")
-        
-        graphTypeGroup = QActionGroup(self)
-        graphTypeGroup.setExclusive(True)
-        
-        graphTypes = [
-            ("Max", 1), ("99th Percentile", 11), ("95th Percentile", 10),
-            ("90th Percentile", 9), ("75th Percentile", 8), ("50th Percentile", 7),
-            ("Avg", 2), ("25th Percentile", 6), ("10th Percentile", 5),
-            ("5th Percentile", 4), ("1st Percentile", 3), ("Min", 0)
-        ]
-        
-        for name, value in graphTypes:
-            action = QAction(name, self)
-            action.setCheckable(True)
-            action.setData(value)
-            if value == 2:  # Default to Avg
-                action.setChecked(True)
-            action.triggered.connect(lambda checked, v=value: self.setGraphType(v))
-            graphTypeGroup.addAction(action)
-            graphMenu.addAction(action)
-        
-        # Observation source selection in menu bar
-        obsMenu = menuBar.addMenu("Observations")
-        
-        obsGroup = QActionGroup(self)
-        obsGroup.setExclusive(True)
-        
-        obsSources = ["None", "Obs", "URMA", "RTMA"]
-        for source in obsSources:
-            action = QAction(source, self)
-            action.setCheckable(True)
-            action.setData(source)
-            if source == "None":
-                action.setChecked(True)
-            action.triggered.connect(lambda checked, s=source: self.setObsSource(s))
-            obsGroup.addAction(action)
-            obsMenu.addAction(action)
-        
-        # Also add a combo box for quick access
-        obsLayout = QHBoxLayout()
-        obsLayout.addWidget(QLabel("Observation Source:"))
-        self.obsSourceCombo = QComboBox()
-        self.obsSourceCombo.addItems(["None", "Obs", "URMA", "RTMA"])
-        self.obsSourceCombo.currentTextChanged.connect(self.onObsSourceChanged)
-        obsLayout.addWidget(self.obsSourceCombo)
-        obsLayout.addStretch()
-        
-        obsWidget = QWidget()
-        obsWidget.setLayout(obsLayout)
-        layout.addWidget(obsWidget)
-        
-        # Graph widget
-        self.graphWidget = GraphWidget(self)
-        layout.addWidget(self.graphWidget, 1)
-        
-        # Button bar
-        buttonLayout = QHBoxLayout()
-        buttonLayout.addStretch()
-        
-        self.updateButton = QPushButton("Update")
-        self.updateButton.setFixedWidth(100)
-        self.updateButton.clicked.connect(self.onUpdate)
-        buttonLayout.addWidget(self.updateButton)
-        
-        closeButton = QPushButton("Close")
-        closeButton.setFixedWidth(100)
-        closeButton.clicked.connect(self.onClose)
-        buttonLayout.addWidget(closeButton)
-        
-        buttonLayout.addStretch()
-        layout.addLayout(buttonLayout)
-        
-        # Context menus
-        self.createContextMenus()
-        
-    def createContextMenus(self):
-        # Model popup menu
-        self.modelPopup = QMenu(self)
-        self.modelNameAction = self.modelPopup.addAction("Model Name")
-        self.modelNameAction.setEnabled(False)
-        self.modelPopup.addSeparator()
-        
-        # Line width submenu
-        lineWidthMenu = self.modelPopup.addMenu("Line Width")
-        self.lineWidthGroup = QActionGroup(self)
-        for w in [1, 2, 3]:
-            action = QAction("%d px" % w, self)
-            action.setCheckable(True)
-            action.setData(w)
-            if w == 1:
-                action.setChecked(True)
-            action.triggered.connect(lambda checked, width=w: self.onLineWidthChange(width))
-            self.lineWidthGroup.addAction(action)
-            lineWidthMenu.addAction(action)
-        
-        # Color action
-        colorAction = self.modelPopup.addAction("Color...")
-        colorAction.triggered.connect(self.onColorChange)
-        
-        # Data points toggle
-        self.dataPointsAction = self.modelPopup.addAction("Show Data Points")
-        self.dataPointsAction.setCheckable(True)
-        self.dataPointsAction.setChecked(True)
-        self.dataPointsAction.triggered.connect(self.onDataPointsChange)
-        
-        # Data labels toggle
-        self.dataLabelsAction = self.modelPopup.addAction("Show Data Labels")
-        self.dataLabelsAction.setCheckable(True)
-        self.dataLabelsAction.setChecked(False)
-        self.dataLabelsAction.triggered.connect(self.onDataLabelsChange)
-        
-        # Label size submenu
-        labelSizeMenu = self.modelPopup.addMenu("Label Size")
-        self.labelSizeGroup = QActionGroup(self)
-        for i, size in enumerate(LabelSizeStrings):
-            action = QAction("%s pt" % size, self)
-            action.setCheckable(True)
-            action.setData(i)
-            if i == 1:
-                action.setChecked(True)
-            action.triggered.connect(lambda checked, idx=i: self.onLabelSizeChange(idx))
-            self.labelSizeGroup.addAction(action)
-            labelSizeMenu.addAction(action)
-        
-        # X-axis popup menu
-        self.xAxisPopup = QMenu(self)
-        timeSplitAction = self.xAxisPopup.addAction("Start Time Axis Here")
-        timeSplitAction.triggered.connect(self.onTimeSplit)
-        timeResetAction = self.xAxisPopup.addAction("Reset Time Axis to all times")
-        timeResetAction.triggered.connect(self.onTimeReset)
-        
-    def setGraphType(self, value):
-        self.graphType = value
-        if self.callback_method:
-            self.callback_method("Redraw")
+        def __init__(self, title="Model Trends", callback_method=None, popup_callback=None, parent_tool=None):
+            super().__init__()
             
-    def setObsSource(self, source):
-        self.obsSourceCombo.setCurrentText(source)
-        
-    def onObsSourceChanged(self, source):
-        if self.popup_callback:
-            self.popup_callback("ObsSourceChange")
-    
-    def showModelPopup(self, modelStr, pos):
-        self.currentPopupModel = modelStr
-        
-        # Update menu state
-        if self.parent_tool:
-            color = self.parent_tool.COLORS.get(modelStr, "#000000")
-            self.modelNameAction.setText(modelStr)
+            self.setWindowTitle(title)
+            self.setMinimumSize(1000, 700)
+            self.resize(1200, 800)
             
-            # Update line width selection
-            lw = self.parent_tool.lineWidth.get(modelStr, 1)
-            for action in self.lineWidthGroup.actions():
-                if action.data() == lw:
+            self.callback_method = callback_method
+            self.popup_callback = popup_callback
+            self.parent_tool = parent_tool
+            
+            # Graph type (0=Min, 1=Max, 2=Avg, etc.)
+            self.graphType = 2
+            
+            # Popup menu state
+            self.currentPopupModel = ""
+            self.popupLineWidth = 1
+            self.popupLabelSize = 1
+            self.timeSplitX = 0
+            
+            self.setupUI()
+            
+        def setupUI(self):
+            layout = QtWidgets.QVBoxLayout(self)
+            
+            # Menu bar
+            menuBar = QtWidgets.QMenuBar(self)
+            layout.setMenuBar(menuBar)
+            
+            # Graph menu
+            graphMenu = menuBar.addMenu("Graph")
+            
+            graphTypeGroup = QtGui.QActionGroup(self)
+            graphTypeGroup.setExclusive(True)
+            
+            graphTypes = [
+                ("Max", 1), ("99th Percentile", 11), ("95th Percentile", 10),
+                ("90th Percentile", 9), ("75th Percentile", 8), ("50th Percentile", 7),
+                ("Avg", 2), ("25th Percentile", 6), ("10th Percentile", 5),
+                ("5th Percentile", 4), ("1st Percentile", 3), ("Min", 0)
+            ]
+            
+            for name, value in graphTypes:
+                action = QtGui.QAction(name, self)
+                action.setCheckable(True)
+                action.setData(value)
+                if value == 2:  # Default to Avg
                     action.setChecked(True)
+                action.triggered.connect(lambda checked, v=value: self.setGraphType(v))
+                graphTypeGroup.addAction(action)
+                graphMenu.addAction(action)
             
-            # Update data points state
-            self.dataPointsAction.setChecked(self.parent_tool.pointState.get(modelStr, 1) == 1)
+            # Observation source selection in menu bar
+            obsMenu = menuBar.addMenu("Observations")
             
-            # Update data labels state
-            self.dataLabelsAction.setChecked(self.parent_tool.labelState.get(modelStr, 0) == 1)
+            obsGroup = QtGui.QActionGroup(self)
+            obsGroup.setExclusive(True)
             
-            # Update label size
-            ls = self.parent_tool.labelSize.get(modelStr, 1)
-            for action in self.labelSizeGroup.actions():
-                if action.data() == ls:
+            obsSources = ["None", "Obs", "URMA", "RTMA"]
+            for source in obsSources:
+                action = QtGui.QAction(source, self)
+                action.setCheckable(True)
+                action.setData(source)
+                if source == "None":
                     action.setChecked(True)
+                action.triggered.connect(lambda checked, s=source: self.setObsSource(s))
+                obsGroup.addAction(action)
+                obsMenu.addAction(action)
+            
+            # Also add a combo box for quick access
+            obsLayout = QtWidgets.QHBoxLayout()
+            obsLayout.addWidget(QtWidgets.QLabel("Observation Source:"))
+            self.obsSourceCombo = QtWidgets.QComboBox()
+            self.obsSourceCombo.addItems(["None", "Obs", "URMA", "RTMA"])
+            self.obsSourceCombo.currentTextChanged.connect(self.onObsSourceChanged)
+            obsLayout.addWidget(self.obsSourceCombo)
+            obsLayout.addStretch()
+            
+            obsWidget = QtWidgets.QWidget()
+            obsWidget.setLayout(obsLayout)
+            layout.addWidget(obsWidget)
+            
+            # Graph widget
+            self.graphWidget = GraphWidget(self)
+            layout.addWidget(self.graphWidget, 1)
+            
+            # Button bar
+            buttonLayout = QtWidgets.QHBoxLayout()
+            buttonLayout.addStretch()
+            
+            self.updateButton = QtWidgets.QPushButton("Update")
+            self.updateButton.setFixedWidth(100)
+            self.updateButton.clicked.connect(self.onUpdate)
+            buttonLayout.addWidget(self.updateButton)
+            
+            closeButton = QtWidgets.QPushButton("Close")
+            closeButton.setFixedWidth(100)
+            closeButton.clicked.connect(self.onClose)
+            buttonLayout.addWidget(closeButton)
+            
+            buttonLayout.addStretch()
+            layout.addLayout(buttonLayout)
+            
+            # Context menus
+            self.createContextMenus()
+            
+        def createContextMenus(self):
+            # Model popup menu
+            self.modelPopup = QtWidgets.QMenu(self)
+            self.modelNameAction = self.modelPopup.addAction("Model Name")
+            self.modelNameAction.setEnabled(False)
+            self.modelPopup.addSeparator()
+            
+            # Line width submenu
+            lineWidthMenu = self.modelPopup.addMenu("Line Width")
+            self.lineWidthGroup = QtGui.QActionGroup(self)
+            for w in [1, 2, 3]:
+                action = QtGui.QAction("%d px" % w, self)
+                action.setCheckable(True)
+                action.setData(w)
+                if w == 1:
+                    action.setChecked(True)
+                action.triggered.connect(lambda checked, width=w: self.onLineWidthChange(width))
+                self.lineWidthGroup.addAction(action)
+                lineWidthMenu.addAction(action)
+            
+            # Color action
+            colorAction = self.modelPopup.addAction("Color...")
+            colorAction.triggered.connect(self.onColorChange)
+            
+            # Data points toggle
+            self.dataPointsAction = self.modelPopup.addAction("Show Data Points")
+            self.dataPointsAction.setCheckable(True)
+            self.dataPointsAction.setChecked(True)
+            self.dataPointsAction.triggered.connect(self.onDataPointsChange)
+            
+            # Data labels toggle
+            self.dataLabelsAction = self.modelPopup.addAction("Show Data Labels")
+            self.dataLabelsAction.setCheckable(True)
+            self.dataLabelsAction.setChecked(False)
+            self.dataLabelsAction.triggered.connect(self.onDataLabelsChange)
+            
+            # Label size submenu
+            labelSizeMenu = self.modelPopup.addMenu("Label Size")
+            self.labelSizeGroup = QtGui.QActionGroup(self)
+            for i, size in enumerate(LabelSizeStrings):
+                action = QtGui.QAction("%s pt" % size, self)
+                action.setCheckable(True)
+                action.setData(i)
+                if i == 1:
+                    action.setChecked(True)
+                action.triggered.connect(lambda checked, idx=i: self.onLabelSizeChange(idx))
+                self.labelSizeGroup.addAction(action)
+                labelSizeMenu.addAction(action)
+            
+            # X-axis popup menu
+            self.xAxisPopup = QtWidgets.QMenu(self)
+            timeSplitAction = self.xAxisPopup.addAction("Start Time Axis Here")
+            timeSplitAction.triggered.connect(self.onTimeSplit)
+            timeResetAction = self.xAxisPopup.addAction("Reset Time Axis to all times")
+            timeResetAction.triggered.connect(self.onTimeReset)
+            
+        def setGraphType(self, value):
+            self.graphType = value
+            if self.callback_method:
+                self.callback_method("Redraw")
+                
+        def setObsSource(self, source):
+            self.obsSourceCombo.setCurrentText(source)
+            
+        def onObsSourceChanged(self, source):
+            if self.popup_callback:
+                self.popup_callback("ObsSourceChange")
         
-        self.modelPopup.popup(pos)
+        def showModelPopup(self, modelStr, pos):
+            self.currentPopupModel = modelStr
+            
+            # Update menu state
+            if self.parent_tool:
+                color = self.parent_tool.COLORS.get(modelStr, "#000000")
+                self.modelNameAction.setText(modelStr)
+                
+                # Update line width selection
+                lw = self.parent_tool.lineWidth.get(modelStr, 1)
+                for action in self.lineWidthGroup.actions():
+                    if action.data() == lw:
+                        action.setChecked(True)
+                
+                # Update data points state
+                self.dataPointsAction.setChecked(self.parent_tool.pointState.get(modelStr, 1) == 1)
+                
+                # Update data labels state
+                self.dataLabelsAction.setChecked(self.parent_tool.labelState.get(modelStr, 0) == 1)
+                
+                # Update label size
+                ls = self.parent_tool.labelSize.get(modelStr, 1)
+                for action in self.labelSizeGroup.actions():
+                    if action.data() == ls:
+                        action.setChecked(True)
+            
+            self.modelPopup.popup(pos)
+            
+        def onLineWidthChange(self, width):
+            self.popupLineWidth = width
+            if self.popup_callback:
+                self.popup_callback("LineChange", self.currentPopupModel)
+                
+        def onColorChange(self):
+            if self.popup_callback:
+                self.popup_callback("ColorChange", self.currentPopupModel)
+                
+        def onDataPointsChange(self):
+            if self.popup_callback:
+                self.popup_callback("DataChange", self.currentPopupModel)
+                
+        def onDataLabelsChange(self):
+            if self.popup_callback:
+                self.popup_callback("LabelChange", self.currentPopupModel)
+                
+        def onLabelSizeChange(self, idx):
+            self.popupLabelSize = idx
+            if self.popup_callback:
+                self.popup_callback("LabelSizeChange", self.currentPopupModel)
+                
+        def onTimeSplit(self):
+            if self.popup_callback:
+                self.popup_callback("TimeSplit")
+                
+        def onTimeReset(self):
+            if self.popup_callback:
+                self.popup_callback("TimeReset")
         
-    def onLineWidthChange(self, width):
-        self.popupLineWidth = width
-        if self.popup_callback:
-            self.popup_callback("LineChange", self.currentPopupModel)
+        def onUpdate(self):
+            if self.callback_method:
+                self.callback_method("Update")
+                
+        def onClose(self):
+            if self.callback_method:
+                self.callback_method("Close")
+            self.accept()
             
-    def onColorChange(self):
-        if self.popup_callback:
-            self.popup_callback("ColorChange", self.currentPopupModel)
-            
-    def onDataPointsChange(self):
-        if self.popup_callback:
-            self.popup_callback("DataChange", self.currentPopupModel)
-            
-    def onDataLabelsChange(self):
-        if self.popup_callback:
-            self.popup_callback("LabelChange", self.currentPopupModel)
-            
-    def onLabelSizeChange(self, idx):
-        self.popupLabelSize = idx
-        if self.popup_callback:
-            self.popup_callback("LabelSizeChange", self.currentPopupModel)
-            
-    def onTimeSplit(self):
-        if self.popup_callback:
-            self.popup_callback("TimeSplit")
-            
-    def onTimeReset(self):
-        if self.popup_callback:
-            self.popup_callback("TimeReset")
+        def resizeEvent(self, event):
+            super().resizeEvent(event)
+            if self.callback_method:
+                self.callback_method("Resize")
+
+    # Cache the classes
+    _GraphWidget = GraphWidget
+    _TrendDialog = TrendDialog
     
-    def onUpdate(self):
-        if self.callback_method:
-            self.callback_method("Update")
-            
-    def onClose(self):
-        if self.callback_method:
-            self.callback_method("Close")
-        self.accept()
-        
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if self.callback_method:
-            self.callback_method("Resize")
+    return GraphWidget, TrendDialog
+
+
+def GraphWidget(*args, **kwargs):
+    """Factory function for GraphWidget - ensures PySide6 is imported first."""
+    GraphWidgetClass, _ = _create_ui_classes()
+    return GraphWidgetClass(*args, **kwargs)
+
+
+def TrendDialog(*args, **kwargs):
+    """Factory function for TrendDialog - ensures PySide6 is imported first."""
+    _, TrendDialogClass = _create_ui_classes()
+    return TrendDialogClass(*args, **kwargs)
