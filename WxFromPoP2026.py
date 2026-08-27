@@ -59,6 +59,14 @@ import time
 #  2022/08/01 - Updated for py3 and HCI.  KA/BOI
 #  2024/05/20 - Added bidirectional PotThunder support & modernizations.  KA/BOI
 #  2026/04/20 - Added more PotThunder fixes. Updated latest python to shorten code. KA/BOI
+#  2026/08/27 - Fixed updatePotThunder so lowering the Wx thunder coverage
+#               (e.g. Chc:T to SChc:T) also lowers PotThunder into the matching
+#               band.  It previously used np.maximum only, which could raise
+#               PotThunder but never lower it.  Fixed "Keep" thunder mode, which
+#               left the assignment grid all zero and wiped PotThunder over the
+#               edit area.  thunderAssignments is now derived once from the
+#               finished Wx grid by thunderFromWxGrid instead of being recorded
+#               by each branch that builds a T key.  KA/BOI
 #
 ################################################################################
 #
@@ -104,6 +112,13 @@ THUNDER_TO_POTTHUNDER = {
     "Num": 55,
     "Wide": 75
 }
+
+# Band floors, ascending.  A PotThunder value decodes to a thunder coverage
+# when floor <= value < the next floor (the same 14.5/24.5/54.5/74.5 breaks
+# used by potMasks).  Derived from the mapping above so the two cannot drift.
+POTTHUNDER_LEVELS = sorted(set(THUNDER_TO_POTTHUNDER.values()))
+POTTHUNDER_BAND_CEILING = {lev: POTTHUNDER_LEVELS[i + 1] - 0.5
+                           for i, lev in enumerate(POTTHUNDER_LEVELS[:-1])}
 
 #
 #  TOOLNAME is the title at the top of the dialog box
@@ -264,9 +279,6 @@ class Tool (SmartScript.SmartScript):
         self.potThunder=self.getGrids(self.mutableName, "PotThunder", "SFC", self.GridTimeRange, noDataError=0)
         if self.potThunder is None:
             self.potThunder = self.newGrid(0.0)
-
-        # Initialize tracking grid for thunder assignments
-        self.thunderAssignments = self.newGrid(0)
 
         # Create spatial masks based on PotThunder thresholds for 'From PotThunder' mode
         # 0: None, 1: SChc/Iso, 2: Chc/Sct, 3: Lkly/Num, 4: Def/Wide
@@ -447,15 +459,11 @@ class Tool (SmartScript.SmartScript):
                             wxstr = f"{pot_ltgtype}:T:<NoInten>:<NoVis>:"
                             idx = self.getIndex(wxstr, wxStrings)
                             wxValues[addthunder] = idx
-                            if pot_ltgtype in THUNDER_TO_POTTHUNDER:
-                                self.thunderAssignments[addthunder] = THUNDER_TO_POTTHUNDER[pot_ltgtype]
                 elif (self.thunderAnswer=="Force") and (lcat>0):
                    addthunder = pmask[cat] & (editAreaMask > 0.5)
                    wxstr = f"{ltgtype}:T:<NoInten>:<NoVis>:"
                    idx = self.getIndex(wxstr, wxStrings)
                    wxValues[addthunder] = idx
-                   if ltgtype in THUNDER_TO_POTTHUNDER:
-                       self.thunderAssignments[addthunder] = THUNDER_TO_POTTHUNDER[ltgtype]
                 continue
 
             #  Rain only areas
@@ -479,8 +487,6 @@ class Tool (SmartScript.SmartScript):
                             wxstr = f"{base_wxstr}^{pot_ltgtype}:T:<NoInten>:<NoVis>:"
                             idx = self.getIndex(wxstr, wxStrings)
                             wxValues[pot_prain] = idx
-                            if pot_ltgtype in THUNDER_TO_POTTHUNDER:
-                                self.thunderAssignments[pot_prain] = THUNDER_TO_POTTHUNDER[pot_ltgtype]
 
                     no_pot_prain = prain & potMasks[0]
                     if no_pot_prain.any():
@@ -490,8 +496,6 @@ class Tool (SmartScript.SmartScript):
                     wxstr = base_wxstr
                     if self.thunderAnswer in ("Force", "Match"):
                         wxstr += f"^{ltgtype}:T:<NoInten>:<NoVis>:"
-                        if ltgtype in THUNDER_TO_POTTHUNDER:
-                            self.thunderAssignments[prain] = THUNDER_TO_POTTHUNDER[ltgtype]
 
                     idx = self.getIndex(wxstr, wxStrings)
                     wxValues[prain] = idx
@@ -517,8 +521,6 @@ class Tool (SmartScript.SmartScript):
                             wxstr = f"{base_wxstr}^{pot_ltgtype}:T:<NoInten>:<NoVis>:"
                             idx = self.getIndex(wxstr, wxStrings)
                             wxValues[pot_psnow] = idx
-                            if pot_ltgtype in THUNDER_TO_POTTHUNDER:
-                                self.thunderAssignments[pot_psnow] = THUNDER_TO_POTTHUNDER[pot_ltgtype]
 
                     no_pot_psnow = psnow & potMasks[0]
                     if no_pot_psnow.any():
@@ -528,8 +530,6 @@ class Tool (SmartScript.SmartScript):
                     wxstr = base_wxstr
                     if self.thunderAnswer in ("Force", "Match"):
                         wxstr += f"^{ltgtype}:T:<NoInten>:<NoVis>:"
-                        if ltgtype in THUNDER_TO_POTTHUNDER:
-                            self.thunderAssignments[psnow] = THUNDER_TO_POTTHUNDER[ltgtype]
 
                     idx = self.getIndex(wxstr, wxStrings)
                     wxValues[psnow] = idx
@@ -557,8 +557,6 @@ class Tool (SmartScript.SmartScript):
                             wxstr = f"{base_wxstr}^{pot_ltgtype}:T:<NoInten>:<NoVis>:"
                             idx = self.getIndex(wxstr, wxStrings)
                             wxValues[pot_pmix] = idx
-                            if pot_ltgtype in THUNDER_TO_POTTHUNDER:
-                                self.thunderAssignments[pot_pmix] = THUNDER_TO_POTTHUNDER[pot_ltgtype]
 
                     no_pot_pmix = pmix & potMasks[0]
                     if no_pot_pmix.any():
@@ -568,8 +566,6 @@ class Tool (SmartScript.SmartScript):
                     wxstr = base_wxstr
                     if self.thunderAnswer in ("Force", "Match"):
                         wxstr += f"^{ltgtype}:T:<NoInten>:<NoVis>:"
-                        if ltgtype in THUNDER_TO_POTTHUNDER:
-                            self.thunderAssignments[pmix] = THUNDER_TO_POTTHUNDER[ltgtype]
 
                     idx = self.getIndex(wxstr, wxStrings)
                     wxValues[pmix] = idx
@@ -587,10 +583,34 @@ class Tool (SmartScript.SmartScript):
         self.Wx = [newWxValues, newWxStrings]
         self.createGrid(self.mutableName, "Wx", "WEATHER", self.Wx, self.GridTimeRange)
 
-        # Update PotThunder grid based on thunder assignments
+        # Bring PotThunder into line with whatever thunder ended up in the final
+        # Wx grid.  Deriving the assignments from the finished grid - rather than
+        # recording them as each branch above builds its keys - keeps the two
+        # elements consistent no matter which thunder mode produced the T, and
+        # covers thunder arriving through the kept-Wx path as well.
+        self.thunderAssignments = self.thunderFromWxGrid(newWxValues, newWxStrings,
+                                                         editAreaMask)
         self.updatePotThunder(editAreaMask)
 
         return
+
+    def thunderFromWxGrid(self, wxValues, wxKeys, editAreaMask):
+        """Derive a PotThunder-equivalent grid from the T entries of a Wx grid.
+
+        Points carrying no thunder are left at 0, matching the convention
+        updatePotThunder expects of self.thunderAssignments.
+        """
+        assignments = self.newGrid(0)
+        inArea = (editAreaMask > 0.5)
+        for i, key in enumerate(wxKeys):
+            level = 0
+            for code in key.split("^"):
+                parts = code.split(":")
+                if len(parts) > 1 and parts[1] == "T":
+                    level = max(level, THUNDER_TO_POTTHUNDER.get(parts[0], 0))
+            if level > 0:
+                assignments[(wxValues == i) & inArea] = level
+        return assignments
 
     def updatePotThunder(self, editAreaMask):
         """Update PotThunder grid to ensure it supports the Wx thunder coverage."""
@@ -603,10 +623,19 @@ class Tool (SmartScript.SmartScript):
         thunderMask = (self.thunderAssignments > 0) & (editAreaMask > 0.5)
 
         if np.any(thunderMask):
-            # Take the maximum of the current PotThunder or the baseline required for the new Wx
+            # Raise PotThunder where it is too low to support the new Wx coverage.
             current_vals = newPotThunder[thunderMask]
             required_vals = self.thunderAssignments[thunderMask]
             newPotThunder[thunderMask] = np.maximum(current_vals, required_vals)
+
+            # Lower PotThunder where it still decodes to a HIGHER coverage than
+            # the new Wx carries - e.g. limiting Wx from Chc:T to SChc:T must not
+            # leave a PotThunder of 25+ behind.  Values already inside the correct
+            # band are left alone so forecaster-drawn detail is preserved.
+            for level, ceiling in POTTHUNDER_BAND_CEILING.items():
+                tooHigh = (thunderMask & (self.thunderAssignments == level)
+                           & (newPotThunder >= ceiling))
+                newPotThunder[tooHigh] = level
 
         # Clear PotThunder from regions that had it removed by Wx updates
         noThunderMask = (self.thunderAssignments == 0) & (editAreaMask > 0.5)
