@@ -9,6 +9,15 @@ Author: Korri Anderson
 
 Version history, newest first.  (Releases before 2.4 were not dated.)
 
+2026/08/27 - version 2.5. KA. Concurrent-write safety.  Every save rewrites the
+             whole file from memory, so a save from another workstation between
+             this session's last read and its next write was silently discarded.
+             The mtimes were already recorded on every read and write but never
+             consulted before overwriting; writeAllFile and writeManFile now
+             check them and ask before clobbering, reloading instead if the
+             operator declines.  Both files are also written through a temp file
+             and swapped in with os.replace, so a crash or a full disk can no
+             longer leave a truncated file for other workstations to read.
 2026/08/27 - version 2.4. KA. Data integrity: "*" placeholders no longer count
              as overrides, and the .manual readers drop entries the files no
              longer contain, so another operator's deletions stop being written
@@ -482,7 +491,7 @@ class MatchObsAllQC(QMainWindow):
         super().__init__()
 
         # Window setup
-        self.setWindowTitle("MatchObsAllQC 2.4")
+        self.setWindowTitle("MatchObsAllQC 2.5")
         self.resize(1200, 1200)
 
         # Initialize data structures
@@ -3030,17 +3039,77 @@ class MatchObsAllQC(QMainWindow):
 
         return (rawList, manList, allVal)
 
+    def _changedOnDisk(self, fullname, knownMtime):
+        """True when the file has moved on since this session last read it.
+
+        Every write here rewrites the whole file from memory, so if another
+        workstation saved in the meantime we would silently discard their work.
+        The mtimes were already being recorded on every read and write - they
+        just were not being consulted before overwriting.
+        """
+        if not knownMtime or not os.path.exists(fullname):
+            return False
+        try:
+            return os.path.getmtime(fullname) != knownMtime
+        except OSError:
+            return False
+
+    def _confirmOverwrite(self, fullname):
+        """Ask whether to clobber a file someone else has changed."""
+        response = QMessageBox.question(
+            self, "File Changed On Disk",
+            f"{os.path.basename(fullname)} has been changed by someone else "
+            f"since this session last read it.\n\n"
+            f"Saving now would overwrite their edits with this session's copy."
+            f"\n\nOverwrite anyway?  Choosing No reloads the file from disk "
+            f"and discards the change you just made.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        return response == QMessageBox.Yes
+
+    def _writeAtomic(self, tmpname, fullname):
+        """Put the finished temp file in place and return the new mtime.
+
+        open(path, "w") truncates in place, so a crash or a full disk part-way
+        through left a corrupt file for every other workstation to read.
+        os.replace is atomic, so readers see either the old file or the new one.
+        """
+        try:
+            os.chmod(tmpname, 0o666)
+        except Exception as e:
+            print(f"Error setting file permissions: {e}")
+
+        os.replace(tmpname, fullname)
+        return os.path.getmtime(fullname)
+
+    def _discardTemp(self, tmpname):
+        """Remove a part-written temp file after a failed write."""
+        try:
+            os.remove(tmpname)
+        except OSError:
+            pass
+
     def writeManFile(self, datetime):
         """Write data to one manual override file"""
         filename = f"{datetime}.manual"
         fullname = os.path.join(DATADIR, filename)
+
+        if self._changedOnDisk(fullname, self.manTimes.get(filename)):
+            if not self._confirmOverwrite(fullname):
+                self.readOneManFile(fullname, datetime)
+                self.manTimes[filename] = os.path.getmtime(fullname)
+                self.redisplay()
+                return
+
         self.statusBar.showMessage(f"Writing {fullname}")
 
         # Back up the existing file before overwriting
         self._backupFile(fullname)
 
+        tmpname = f"{fullname}.tmp{os.getpid()}"
         try:
-            with open(fullname, "w") as datafile:
+            with open(tmpname, "w") as datafile:
                 # Debug: Print the data structure
                 dbg(f"Writing to {fullname}")
                 dbg(f"Field order: ID, name, lat, lon, elev, tmp, dew, dir, spd, gst")
@@ -3101,17 +3170,12 @@ class MatchObsAllQC(QMainWindow):
 
                     datafile.write(outline)
 
-            # Make file writable by all
-            try:
-                os.chmod(fullname, 0o666)
-            except Exception as e:
-                print(f"Error setting file permissions: {e}")
-
-            # Update the mantimes dictionary with the new file time
-            self.manTimes[filename] = os.path.getmtime(fullname)
-            print(f"Successfully wrote manual override file: {fullname}")
+            # Swap the finished file into place and record its new time
+            self.manTimes[filename] = self._writeAtomic(tmpname, fullname)
+            dbg(f"Successfully wrote manual override file: {fullname}")
 
         except Exception as e:
+            self._discardTemp(tmpname)
             self.statusBar.showMessage(f"Error writing manual file: {e}")
             print(f"Error writing manual file: {e}")
             print(traceback.format_exc())
@@ -3119,13 +3183,22 @@ class MatchObsAllQC(QMainWindow):
     def writeAllFile(self):
         """Write data to all.manual file"""
         fullname = os.path.join(DATADIR, "all.manual")
+
+        if self._changedOnDisk(fullname, self.allTimes):
+            if not self._confirmOverwrite(fullname):
+                self.readAllFile(fullname)
+                self.allTimes = os.path.getmtime(fullname)
+                self.redisplay()
+                return
+
         self.statusBar.showMessage(f"Writing {fullname}")
 
         # Back up the existing file before overwriting
         self._backupFile(fullname)
 
+        tmpname = f"{fullname}.tmp{os.getpid()}"
         try:
-            with open(fullname, "w") as datafile:
+            with open(tmpname, "w") as datafile:
                 # Debug: Print the data structure
                 dbg(f"Writing to {fullname}")
                 dbg(f"Field order: ID, name, lat, lon, elev, tmp, dew, dir, spd, gst")
@@ -3179,17 +3252,12 @@ class MatchObsAllQC(QMainWindow):
 
                     datafile.write(outline)
 
-            # Make file writable by all
-            try:
-                os.chmod(fullname, 0o666)
-            except Exception as e:
-                print(f"Error setting file permissions: {e}")
-
-            # Update all.manual time
-            self.allTimes = os.path.getmtime(fullname)
-            print(f"Successfully wrote all.manual file: {fullname}")
+            # Swap the finished file into place and record its new time
+            self.allTimes = self._writeAtomic(tmpname, fullname)
+            dbg(f"Successfully wrote all.manual file: {fullname}")
 
         except Exception as e:
+            self._discardTemp(tmpname)
             self.statusBar.showMessage(f"Error writing all.manual file: {e}")
             print(f"Error writing all.manual file: {e}")
             print(traceback.format_exc())
@@ -3353,7 +3421,7 @@ class MatchObsAllQC(QMainWindow):
                 row += 1
 
             # Update title and status
-            self.setWindowTitle(f"MatchObsAllQC 2.4 - {stationId}")
+            self.setWindowTitle(f"MatchObsAllQC 2.5 - {stationId}")
             self.statusBar.showMessage(f"Viewing data for {stationId}")
 
             # Set a reasonable width for the table
@@ -3710,7 +3778,7 @@ class MatchObsAllQC(QMainWindow):
 
             # Update title and status
             formattedTime = self.getSplitTime(datetime)
-            self.setWindowTitle(f"MatchObsAllQC 2.4 - {formattedTime}")
+            self.setWindowTitle(f"MatchObsAllQC 2.5 - {formattedTime}")
             self.statusBar.showMessage(f"Viewing data for {self.getTimeFromDateTime(datetime)}")
 
             # Set a reasonable width for the table
