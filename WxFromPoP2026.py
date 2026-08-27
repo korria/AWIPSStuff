@@ -6,14 +6,11 @@ ScreenList = ["Wx"]
 import numpy as np
 import re
 import OKDialog
-import sys
 import tkinter as tk
 
 import TimeRange
-import copy
 
 import AppDialog
-import time
 
 
 ################################################################################
@@ -67,6 +64,15 @@ import time
 #               edit area.  thunderAssignments is now derived once from the
 #               finished Wx grid by thunderFromWxGrid instead of being recorded
 #               by each branch that builds a T key.  KA/BOI
+#  2026/08/27 - WxIntensity and keepWxInGrid now work on copies instead of
+#               rescaling and remapping the cached grids in place, so pressing
+#               Run twice no longer changes the answer.  Required elements are
+#               checked once before any grid is written, so a missing element
+#               reports once and changes nothing instead of updating part of the
+#               selection.  Added "no grids selected" and "updated N grids"
+#               feedback.  Settings with no dialog widget (PoP threshold, keep
+#               list, ptype, intensity) moved from tkinter variables nothing
+#               could edit to plain configuration constants.  KA/BOI
 #
 ################################################################################
 #
@@ -85,6 +91,17 @@ defaultBotRainSnow = -400
 # default Keep Wx list
 
 KeepList = "WP,L,F,ZF,IF,IC,H,BS,BN,K,BD,FR,ZY,VA"
+
+#  Settings the dialog has no widget for.  These were previously carried as
+#  tkinter variables that nothing in the GUI could edit, which made them look
+#  like forecaster settings and explains why saveStatus never stored them.
+#  They are plain configuration - change them here.
+
+PopThreshold = 15                 #  percent; below this a point gets no precip
+KeepExistingWx = "Y"              #  "Y" keeps the KeepList types already in Wx
+DefaultPtype = "Rain/Snow"        #  Rain/Snow, Snow, Freezing Rain, Sleet
+DefaultIntensity = "Light"        #  Light, Moderate, Heavy, Sprinkles/Flurries,
+                                  #  or "from QPF/SnowAmt"
 
 #  Thresholds for rain and snow intensity.  These are based on 6-hr QPF and
 #  SnowAmt grids.  So, for example, if the grid point has 0.25" of rain in
@@ -187,15 +204,14 @@ class Tool (SmartScript.SmartScript):
             return
 
         self.mutableName=self.mutableID().modelName()
-        selectTR=self.SelectTR
 
         # get the various settings from the GUI
         self.coverage=self.dialog.coverage.get()
         self.convective=self.dialog.convective.get()
-        self.ptype=self.dialog.ptype.get()
-        self.intensity=self.dialog.intensity.get()
-        self.keepWx=self.dialog.keepWx.get()
-        self.keepWxList=self.dialog.keepWxList.get()
+        self.ptype=DefaultPtype
+        self.intensity=DefaultIntensity
+        self.keepWx=KeepExistingWx
+        self.keepWxList=KeepList
 
         self.thunderAnswer=self.dialog.thunder.get()
         if self.convective=="Stratiform": # if stratiform - no thunder will be allowed
@@ -221,7 +237,7 @@ class Tool (SmartScript.SmartScript):
             self.keepWxList += ",IP"
         self.immatchLev=self.dialog.immatchLev.get()
 
-        self.popThresh=self.dialog.popThresh.get()
+        self.popThresh=PopThreshold
 
         if self.intensity == "from QPF/SnowAmt":
             self.intensityFromGrids = "Yes"
@@ -237,13 +253,51 @@ class Tool (SmartScript.SmartScript):
         selectTR=TimeRange.TimeRange(javaselectTR)
         infoList = self.getGridInfo(self.mutableName, "Wx", "SFC", selectTR)
 
+        if not infoList:
+            self.statusBarMsg("%s: no Wx grids in the selected time range." % TOOLNAME, "U")
+            self.saveStatus()
+            return
+
+        #  Check the whole selection before writing anything.  Previously a
+        #  missing element was caught inside runWxTool, which had already been
+        #  called for the earlier grids - so the run left some grids updated and
+        #  some not, and repeated the same message once per grid in the range.
+        timeRanges = [info.gridTime() for info in infoList]
+        missing = self.missingElements(timeRanges)
+        if missing:
+            self.statusBarMsg("%s: no %s over the selected range - nothing changed."
+                              % (TOOLNAME, ", ".join(missing)), "U")
+            self.saveStatus()
+            return
+
         # Now loop through each Wx grid that's in this time range.  Call the
         # runWxTool routine for each Wx grid selected
-        for info in infoList:
-             self.GridTimeRange = info.gridTime()
+        for timeRange in timeRanges:
+             self.GridTimeRange = timeRange
              self.runWxTool()
+        self.statusBarMsg("%s: updated %d Wx grid(s)." % (TOOLNAME, len(timeRanges)), "S")
         self.saveStatus()
         return
+
+    #  Elements runWxTool needs on every grid.  PotThunder is not listed: the
+    #  tool substitutes a zero grid when a site has none.
+    REQUIRED_ELEMENTS = ["PoP", "SnowLevel", "Wx", "T"]
+
+    def missingElements(self, timeRanges):
+        """Names of required elements with no data somewhere in the selection.
+
+        Probes with the same getGrids(noDataError=0) call runWxTool relies on,
+        so whatever runWxTool would have refused to run on is caught here first,
+        before any grid has been written.
+        """
+        missing = []
+        for element in self.REQUIRED_ELEMENTS:
+            for timeRange in timeRanges:
+                if self.getGrids(self.mutableName, element, "SFC", timeRange,
+                                 noDataError=0) is None:
+                    missing.append(element)
+                    break
+        return missing
 
 
     def runWxTool(self):
@@ -641,8 +695,15 @@ class Tool (SmartScript.SmartScript):
         noThunderMask = (self.thunderAssignments == 0) & (editAreaMask > 0.5)
         newPotThunder[noThunderMask & (newPotThunder >= 14.5)] = 14
 
-        # Save the updated PotThunder grid
-        self.createGrid(self.mutableName, "PotThunder", "SCALAR", newPotThunder, self.GridTimeRange)
+        # Save the updated PotThunder grid.  A site with no PotThunder parm
+        # raises here - after the Wx grid was already committed - so report the
+        # failure rather than leaving a traceback and a half-applied edit.
+        try:
+            self.createGrid(self.mutableName, "PotThunder", "SCALAR", newPotThunder,
+                            self.GridTimeRange)
+        except Exception as e:
+            self.statusBarMsg("%s: Wx updated but PotThunder could not be written (%s)."
+                              % (TOOLNAME, e), "U")
 
 
 # Merges the oldWx and newWx grids
@@ -659,10 +720,7 @@ class Tool (SmartScript.SmartScript):
                 # see if there are any gridpoints that the newWx in the new grid and the
                 # oldWx in the old grid.  If so, we'll need to combine them.
                 valuesBoth= (oldWxValues == oldIndex) & (newWxValues == newIndex)
-                needBoth=np.zeros(valuesBoth.shape)
-                needBoth[valuesBoth]=1
                 existBoth=valuesBoth.any()
-                numneeded=np.sum(needBoth)
 
                 if existBoth:
                     oldString=oldWxKeys[oldIndex]
@@ -737,7 +795,12 @@ class Tool (SmartScript.SmartScript):
     def keepWxInGrid(self, WxGrid, editAreaMask):
         wxList = self.keepWxList.split(",")
 
+        #  Copy both halves.  WxGrid is the cached Wx grid, and this routine
+        #  remaps the values and appends to the key list; without copies a second
+        #  Run press re-filtered already-filtered data against a grown key list.
         wxValues, keys = WxGrid
+        wxValues = wxValues.copy()
+        keys = list(keys)
         WxOut = []
         emptyWx="<NoCov>:<NoWx>:<NoInten>:<NoVis>:"
 
@@ -771,7 +834,7 @@ class Tool (SmartScript.SmartScript):
             else:
                 trans[i]=i
 
-        newwxValues=wxValues
+        newwxValues=wxValues.copy()
         for i in range(numkeys):
            keyInArea= (wxValues == i) & (editAreaMask > 0.5)
            newwxValues[keyInArea]=trans[i]
@@ -781,15 +844,17 @@ class Tool (SmartScript.SmartScript):
     #  modify Wx intensity based upon QPF and/or SnowAmt
 
     def WxIntensity(self, snowMask, wxValues, wxKeys):
-        PoP = self.getGrids(self.mutableName, 'PoP', 'SFC', self.GridTimeRange,
-                            noDataError=0)
         QPF = self.getGrids(self.mutableName, 'QPF', 'SFC', self.GridTimeRange, mode="Sum",
                             noDataError=0)
 
         if QPF is None:
             return (wxValues, wxKeys)
 
+        #  Work on a copy.  getGrids caches, and the Run button does not dismiss
+        #  the dialog, so rescaling these arrays in place left a second Run press
+        #  reading values the first press had already scaled.
         try:
+            QPF=QPF.copy()
             QPF[QPF<0.01]=0.00
         except Exception:
             QPF=self.newGrid(0)
@@ -798,11 +863,10 @@ class Tool (SmartScript.SmartScript):
                             noDataError=0)
         if SnowAmt is None:
             return (wxValues, wxKeys)
+        SnowAmt=SnowAmt.copy()
 
         valleyMask = self.Topo <= valleyMtnThreshold
-        mtnMask = self.Topo > valleyMtnThreshold
 
-        startQPF = curGridStart = self.GridTimeRange.startTime()
         duration = float(self.GridTimeRange.duration()) / 3600.0
 
         if duration > 6.0:
@@ -811,9 +875,6 @@ class Tool (SmartScript.SmartScript):
 
         modPcpnDict = {}
         hvyPcpnDict = {}
-
-        modMask = self.newGrid(0)
-        hvyMask = self.newGrid(0)
 
         Amount=QPF.copy()
         Amount[snowMask]=SnowAmt[snowMask]
@@ -835,7 +896,9 @@ class Tool (SmartScript.SmartScript):
         modMask = ((self.PoP >= self.popThresh) & (Amount >= modThresh) & (Amount < hvyThresh))
         hvyMask = ((self.PoP >= self.popThresh) & (Amount >= hvyThresh))
 
-        for wx in wxKeys:
+        #  Snapshot the key list: getIndex below appends to wxKeys as new
+        #  intensity variants are created, and this loop iterates it.
+        for wx in list(wxKeys):
             modPcpn = wx
             hvyPcpn = wx
 
@@ -1173,17 +1236,6 @@ class WxTool(AppDialog.AppDialog):
                                         highlightthickness=0, height=1, command=self.changeConvective)
         self.strbut.pack(side=tk.LEFT)
         convectiveFrame.pack(side=tk.TOP, fill=tk.BOTH, expand=0)
-
-        self.ptype=tk.StringVar()
-        self.ptype.set("Rain/Snow")
-        self.popThresh=tk.IntVar()
-        self.popThresh.set(15)
-        self.intensity=tk.StringVar()
-        self.intensity.set("Light")
-        self.keepWx=tk.StringVar()
-        self.keepWx.set("Y")
-        self.keepWxList=tk.StringVar()
-        self.keepWxList.set(KeepList)
 
         sliderFrame=tk.Frame(master, relief=tk.GROOVE, borderwidth=3, background=bgcol)
         mixOpen=tk.Frame(sliderFrame, background=bgcol)
