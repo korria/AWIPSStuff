@@ -7,14 +7,26 @@ Tim Barker's MatchObsAllQC program.
 
 Author: Korri Anderson
 
-Version 2.1 - Uses PySide2 instead of Tkinter, also allows for better sorting features.
-Version 2.2 - Pyside6 - AWIPS 23.4.2
-Version 2.3 - Added support for Adwaita-dark theme.
-Version 2.4 - Data-integrity fixes: "*" placeholders no longer count as
-              overrides, the .manual readers drop entries the files no longer
-              contain, "Select None" on the CWA filter hides every station, and
-              rebuilding that filter keeps the forecaster's selection.  Added
-              Stations > Clear Ignore-All for Non-Reporting Stations.
+Version history, newest first.  (Releases before 2.4 were not dated.)
+
+2026/08/27 - version 2.4. KA. Data integrity: "*" placeholders no longer count
+             as overrides, and the .manual readers drop entries the files no
+             longer contain, so another operator's deletions stop being written
+             back.  CWA filter: "Select None" hides every station, and a rebuild
+             keeps the forecaster's selection.  Display: readShapes fills in
+             stations that appear after the lat/lon limits settle, geom.dat rows
+             are parsed individually, table spans are cleared, "Issues only"
+             respects the displayed hour, and sort keys carry the station ID
+             beside them so hyphenated IDs survive.  Lifecycle: RunnerThread no
+             longer shadows QThread.finished, has a timeout, and is waited on at
+             close; the selectors rebuild without firing signals mid-load.
+             Overrides must be numeric and non-blank.  Added Stations > Clear
+             Ignore-All for Non-Reporting Stations.  Per-station debug output is
+             behind MOAQC_DEBUG.
+  (undated) - version 2.3. KA. Added support for Adwaita-dark theme.
+  (undated) - version 2.2. KA. PySide6 - AWIPS 23.4.2.
+  (undated) - version 2.1. KA. Uses PySide2 instead of Tkinter, also allows for
+             better sorting features.
 
 """
 
@@ -50,6 +62,17 @@ try:
 except ImportError as e:
     print(f"Warning: Could not import MatchObsAllQc_config: {e}")
     sys.exit(1)
+
+#  Per-station chatter on the hot paths (every redisplay, every QC write) is
+#  synchronous stdout that blocks the GUI.  Set MOAQC_DEBUG=1 to turn it back on.
+DEBUG = os.environ.get("MOAQC_DEBUG", "") not in ("", "0")
+
+
+def dbg(*args, **kwargs):
+    """print() that only speaks when MOAQC_DEBUG is set."""
+    if DEBUG:
+        print(*args, **kwargs)
+
 
 # Make sure the data directory exists
 if not os.path.exists(DATADIR):
@@ -103,9 +126,36 @@ class OverrideDialog(QDialog):
         self.okButton.clicked.connect(self.accept)
         self.cancelButton.clicked.connect(self.reject)
 
+        #  OK stays disabled until something is typed.  An empty string is the
+        #  same sentinel the tool uses for "ignore", so OK-on-blank used to turn
+        #  an override into an ignore and drop the ob entirely.
+        self.okButton.setEnabled(False)
+        self.overrideInput.textChanged.connect(
+            lambda text: self.okButton.setEnabled(bool(text.strip()))
+        )
+
+    def accept(self):
+        """Refuse anything MatchObsAll could not read back as a number."""
+        text = self.overrideInput.text().strip()
+        if not text:
+            return
+
+        try:
+            float(text)
+        except ValueError:
+            QMessageBox.warning(
+                self, "Invalid Override",
+                f"'{text}' is not a number.\n\n"
+                f"Override values are written straight into the .manual file "
+                f"for MatchObsAll to parse, so they have to be numeric."
+            )
+            return
+
+        super().accept()
+
     def getValue(self):
         """Return the entered override value"""
-        return self.overrideInput.text()
+        return self.overrideInput.text().strip()
 
     @staticmethod
     def getOverride(parent=None, currentValue=""):
@@ -198,11 +248,26 @@ class StationSearchComboBox(QComboBox):
         self.ignoreSelectionChanges = False
 
     def setAllStations(self, stations):
-        """Set the full list of stations"""
+        """Set the full list of stations.
+
+        Rebuilt with signals blocked: clear() plus the first addItem() used to
+        emit currentIndexChanged mid-reload and clobber the selected station.
+        """
+        previous = self.currentText()
         self.allStations = stations
-        self.clear()
-        for station in stations:
-            self.addItem(station)
+
+        self.blockSignals(True)
+        try:
+            self.clear()
+            for station in stations:
+                self.addItem(station)
+
+            if previous:
+                index = self.findText(previous)
+                if index >= 0:
+                    self.setCurrentIndex(index)
+        finally:
+            self.blockSignals(False)
 
     def delayedFilter(self, text):
         """Store the text and restart the filter timer"""
@@ -364,7 +429,14 @@ class DataTable(QTableWidget):
 class RunnerThread(QThread):
     """Thread for running background processes"""
 
-    finished = Signal(bool, str)  # Success flag and message
+    #  NOT named "finished": QThread already emits a zero-argument finished()
+    #  when run() returns, and shadowing it bound moaFinished to both, so the
+    #  slot fired twice or was called with no arguments at all.
+    runFinished = Signal(bool, str)  # Success flag and message
+
+    #  Ceiling on the child process so a hung "ssh pv2" cannot pin the thread
+    #  forever with the Run button disabled.
+    TIMEOUT_SECONDS = 30 * 60
 
     def __init__(self, command):
         super().__init__()
@@ -372,6 +444,7 @@ class RunnerThread(QThread):
 
     def run(self):
         """Run the command in a separate thread"""
+        process = None
         try:
             process = subprocess.Popen(
                 self.command,
@@ -381,15 +454,26 @@ class RunnerThread(QThread):
                 universal_newlines=True
             )
 
-            stdout, stderr = process.communicate()
+            try:
+                stdout, stderr = process.communicate(timeout=self.TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+                self.runFinished.emit(
+                    False,
+                    f"Timed out after {self.TIMEOUT_SECONDS // 60} minutes"
+                )
+                return
 
             if process.returncode == 0:
-                self.finished.emit(True, "Success")
+                self.runFinished.emit(True, "Success")
             else:
-                self.finished.emit(False, stderr)
+                self.runFinished.emit(False, stderr)
 
         except Exception as e:
-            self.finished.emit(False, str(e))
+            if process is not None and process.poll() is None:
+                process.kill()
+            self.runFinished.emit(False, str(e))
 
 class MatchObsAllQC(QMainWindow):
     """Main application window for MatchObsAllQC"""
@@ -411,7 +495,6 @@ class MatchObsAllQC(QMainWindow):
         # Configuration
         self.currentDatetime = None
         self.currentStation = None
-        self.clickedTime = None  # Store the time user clicked on when switching views
         self.displayMode = "Time"  # 'Time' or 'Station'
         self.dataFiles = []
         self.manFiles = []
@@ -438,6 +521,8 @@ class MatchObsAllQC(QMainWindow):
         # spikeFlags:  {(stationId, datetime, field_id): True}
         self.sanityFlags = {}
         self.spikeFlags = {}
+        # {datetime: set_of_station_ids} - rebuilt alongside the flags above
+        self.flaggedStationsByTime = {}
 
         # Physical sanity check limits (Fahrenheit / knots / degrees).
         # A value outside [min, max] gets flagged. Keys are field ids.
@@ -521,6 +606,11 @@ class MatchObsAllQC(QMainWindow):
 
         # Set counts for convenience
         self.numStaticFields = len(self.staticFields)
+        #  staticFields[0] is the ID, which is kept as the dictionary key rather
+        #  than in the value list, so one fewer attribute is actually stored.
+        #  Reading numStaticFields of them collected vals[5] - the first
+        #  observation - into self.static as a phantom fifth "static" field.
+        self.numStaticAttrs = self.numStaticFields - 1
         self.numVariableFields = len(self.variableFields)
         self.dataFieldStart = 5  # Index where variable data starts in data files
 
@@ -990,24 +1080,6 @@ class MatchObsAllQC(QMainWindow):
             if item and item.widget():
                 item.widget().hide()
 
-    def updateSelectors(self):
-        """Update the time and station selector dropdowns"""
-        # Update time selector
-        self.timeSelector.clear()
-        for date in self.dates:
-            displayText = self.getTimeFromDateTime(date)
-            self.timeSelector.addItem(displayText, date)
-
-        # Update station selector with searchable functionality
-        allStations = sorted(self.allStations)
-        self.stationSelector.setAllStations(allStations)
-
-        print(f"Added {len(allStations)} stations to searchable selector")
-        # Print the first few stations as a debug check
-        print("First 10 stations:")
-        for i in range(min(10, len(allStations))):
-            print(f"  {allStations[i]}")
-
     def timeSelected(self, index):
         """Handle time selection from dropdown"""
         if index >= 0 and index < self.timeSelector.count():
@@ -1188,7 +1260,6 @@ class MatchObsAllQC(QMainWindow):
                     # Check if this is actually a station ID (not a header)
                     if stationId in self.allStations:
                         # Store the current time before switching views
-                        self.clickedTime = self.currentDatetime
 
                         # Switch to station view
                         self.modeSelector.setCurrentIndex(1)  # Trigger change to station view
@@ -1284,10 +1355,6 @@ class MatchObsAllQC(QMainWindow):
             overrideAction.triggered.connect(self.override)
             contextMenu.addAction(overrideAction)
 
-            # overrideAllAction = QAction("Override all values for this station", self)
-            # overrideAllAction.triggered.connect(self.overrideAll)
-            # contextMenu.addAction(overrideAllAction)
-
         elif status == "ignore":
             # For ignored data
             cancelAction = QAction("Cancel ignore", self)
@@ -1330,18 +1397,12 @@ class MatchObsAllQC(QMainWindow):
 
     def ignore(self):
         """Handle the 'Ignore this value' action"""
-        # Add debug info
-        print(f"Ignoring value for field {self.tagVal}, station {self.tagId}, time {self.tagTime}")
+        dbg(f"Ignoring value for field {self.tagVal}, station {self.tagId}, "
+            f"time {self.tagTime}")
 
-        # Get the field index from the field ID
-        fieldIndex = -1
-        for i, field in enumerate(self.variableFields):
-            if field["id"] == self.tagVal:
-                fieldIndex = i
-                print(f"Found field {self.tagVal} at index {fieldIndex}")
-                break
-
-        if fieldIndex == -1:
+        #  Validate the field id before touching anything.  This used to build
+        #  an index that nothing downstream read; only the guard mattered.
+        if self.tagVal not in [field["id"] for field in self.variableFields]:
             print(f"Error: Could not find field {self.tagVal}")
             return
 
@@ -1413,33 +1474,6 @@ class MatchObsAllQC(QMainWindow):
             self.writeManFile(self.tagTime)
         self.redisplay()
 
-    def overrideAll(self):
-        """Handle the 'Override all values for this station' action"""
-        # Get the current value
-        fieldList = self.getList(self.tagVal, self.tagId)
-        currentValue = ""
-        if self.tagTime in fieldList:
-            currentValue = fieldList[self.tagTime]
-
-        # Ask for the override value
-        ask = OverrideDialog.getOverride(self, currentValue)
-        if ask is not None:
-            sid, fid = self.tagId, self.tagVal
-
-            # Snapshot BEFORE mutating
-            prev = self.getAll(fid, sid)
-
-            def restore():
-                self.setAll(prev, fid, sid)
-                self.writeAllFile()
-
-            self._pushUndo(f"Override all {fid} for {sid} → {ask}", restore)
-
-            override = ask
-            self.setAll(override, self.tagVal, self.tagId)
-            self.writeAllFile()
-        self.redisplay()
-
     def cancelIgnore(self):
         """Cancel an ignore by removing the entry"""
         sid, fid, dt = self.tagId, self.tagVal, self.tagTime
@@ -1459,8 +1493,12 @@ class MatchObsAllQC(QMainWindow):
             self.writeManFile(dt)
         self.redisplay()
 
-    def cancelIgnoreAll(self):
-        """Cancel ignoring all by resetting to '*'"""
+    def _resetAllEntry(self, description):
+        """Reset this cell's all.manual value to '*' (no override), with undo.
+
+        Shared by cancelIgnoreAll and cancelOverrideAll, which had identical
+        bodies and differed only in the undo description.
+        """
         sid, fid = self.tagId, self.tagVal
         prev = self.getAll(fid, sid)
 
@@ -1468,11 +1506,15 @@ class MatchObsAllQC(QMainWindow):
             self.setAll(prev, fid, sid)
             self.writeAllFile()
 
-        self._pushUndo(f"Cancel ignore-all {fid} for {sid}", restore)
+        self._pushUndo(description, restore)
 
-        self.setAll("*", self.tagVal, self.tagId)
+        self.setAll("*", fid, sid)
         self.writeAllFile()
         self.redisplay()
+
+    def cancelIgnoreAll(self):
+        """Cancel ignoring all by resetting to '*'"""
+        self._resetAllEntry(f"Cancel ignore-all {self.tagVal} for {self.tagId}")
 
     def cancelOverride(self):
         """Cancel an override by removing the entry"""
@@ -1494,19 +1536,7 @@ class MatchObsAllQC(QMainWindow):
 
     def cancelOverrideAll(self):
         """Cancel overriding all by resetting to '*'"""
-        # Snapshot for undo
-        prev = self.getAll(self.tagVal, self.tagId)
-        sid, fid = self.tagId, self.tagVal
-
-        def restore():
-            self.setAll(prev, fid, sid)
-            self.writeAllFile()
-
-        self._pushUndo(f"Cancel override all {fid} for {sid}", restore)
-
-        self.setAll("*", self.tagVal, self.tagId)
-        self.writeAllFile()
-        self.redisplay()
+        self._resetAllEntry(f"Cancel override all {self.tagVal} for {self.tagId}")
 
     # ------------------------------------------------------------------
     # Backups
@@ -1724,6 +1754,16 @@ class MatchObsAllQC(QMainWindow):
             print(f"Error computing spike flags: {e}")
             self.spikeFlags = {}
 
+        #  Index the flags by time so the "Issues only" filter can ask whether a
+        #  station is flagged at the displayed hour in O(1).  It used to scan
+        #  both dictionaries once per station, which is quadratic and answered
+        #  the wrong question - a 06Z spike kept a station on screen at 18Z.
+        self.flaggedStationsByTime = {}
+        for (stationId, flagTime) in self.sanityFlags:
+            self.flaggedStationsByTime.setdefault(flagTime, set()).add(stationId)
+        for (stationId, flagTime, _fieldId) in self.spikeFlags:
+            self.flaggedStationsByTime.setdefault(flagTime, set()).add(stationId)
+
     def _autoStatusForCell(self, stationId, datetime, fieldId, baseStatus):
         """Given a cell's currently-determined base status, upgrade to
         'sanity' or 'spike' if appropriate. Auto-detected statuses only
@@ -1741,17 +1781,24 @@ class MatchObsAllQC(QMainWindow):
     # Issues-only filter (Time view)
     # ------------------------------------------------------------------
 
-    def _stationHasIssues(self, stationId, unchangedValuesMap=None):
+    def _stationHasIssues(self, stationId, unchangedValuesMap=None, datetime=None):
         """Return True if a station has any of:
         - manual per-time overrides/ignores in self.man
         - all-station overrides/ignores in self.all
         - unchanged-value flags (passed in from display loop)
         - any sanity-flag entries
         - any spike-flag entries
+
+        When datetime is given only that hour counts, because the filter is
+        about the row actually on screen.  Ignore-alls in self.all are
+        time-independent and always count.
         """
         if stationId in self.man:
             for fieldList in self.man[stationId]:
-                if fieldList:
+                if datetime is None:
+                    if fieldList:
+                        return True
+                elif datetime in fieldList:
                     return True
 
         if stationId in self.all:
@@ -1761,6 +1808,9 @@ class MatchObsAllQC(QMainWindow):
 
         if unchangedValuesMap and stationId in unchangedValuesMap:
             return True
+
+        if datetime is not None:
+            return stationId in self.flaggedStationsByTime.get(datetime, ())
 
         for (sid, _dt) in self.sanityFlags.keys():
             if sid == stationId:
@@ -2166,7 +2216,7 @@ class MatchObsAllQC(QMainWindow):
             try:
                 # Start the process in a separate thread
                 self.runnerThread = RunnerThread(f"ssh pv2 {MOADIR}/bin/RunObs.sh")
-                self.runnerThread.finished.connect(self.moaFinished)
+                self.runnerThread.runFinished.connect(self.moaFinished)
                 self.runnerThread.start()
             except Exception as e:
                 print(f"Error starting runner thread: {e}")
@@ -2175,6 +2225,32 @@ class MatchObsAllQC(QMainWindow):
                 self.runMoaBtn.setStyleSheet("background-color:red;")
                 QMessageBox.warning(self, "Error", f"Error running MatchObsAll: {str(e)}")
                 self.statusBar.showMessage("Error running MatchObsAll", 3000)
+
+    def closeEvent(self, event):
+        """Let a running MatchObsAll thread finish before the window goes away.
+
+        Without this, quitting mid-run destroyed a live QThread and Qt aborted
+        the process with "QThread: Destroyed while thread is still running".
+        """
+        thread = getattr(self, "runnerThread", None)
+        if thread is not None and thread.isRunning():
+            response = QMessageBox.question(
+                self, "MatchObsAll Still Running",
+                "MatchObsAll is still running.  Wait for it to finish?",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                QMessageBox.Yes
+            )
+            if response == QMessageBox.Cancel:
+                event.ignore()
+                return
+            if response == QMessageBox.Yes:
+                self.statusBar.showMessage("Waiting for MatchObsAll to finish...")
+                thread.wait()
+            else:
+                thread.terminate()
+                thread.wait()
+
+        event.accept()
 
     def moaFinished(self, success, message):
         """Handle completion of MatchObsAll process"""
@@ -2201,25 +2277,33 @@ class MatchObsAllQC(QMainWindow):
             self.statusBar.showMessage(f"Geography file not found: {fullname}")
             return
 
+        #  Each row is parsed on its own.  A single unparseable lat/lon used to
+        #  unwind the whole read, so the stations after it were never loaded and
+        #  every one of them was silently dropped from the display.
+        skipped = 0
         try:
             with open(fullname, "r") as datafile:
-                for line in datafile:
+                for lineNumber, line in enumerate(datafile, 1):
                     pieces = line.strip().split(",")
                     if len(pieces) != 14:  # Expected format
-                        self.statusBar.showMessage(f"Corrupt geom data: {line}")
+                        skipped += 1
+                        dbg(f"geom.dat line {lineNumber}: expected 14 fields, "
+                            f"got {len(pieces)}")
                         continue
 
-                    datalist = []
-                    for i, piece in enumerate(pieces):
-                        ps = piece.strip()
-                        if i == 0:
-                            stationId = ps
-                        else:
-                            datalist.append(ps)
-                        if i == 2:
-                            lat = float(ps)
-                        if i == 3:
-                            lon = float(ps)
+                    try:
+                        stationId = pieces[0].strip()
+                        datalist = [piece.strip() for piece in pieces[1:]]
+                        lat = float(pieces[2].strip())
+                        lon = float(pieces[3].strip())
+                    except ValueError as e:
+                        skipped += 1
+                        dbg(f"geom.dat line {lineNumber}: {e}")
+                        continue
+
+                    if not stationId:
+                        skipped += 1
+                        continue
 
                     self.curr[stationId] = datalist
                     self.currLat[stationId] = lat
@@ -2228,6 +2312,21 @@ class MatchObsAllQC(QMainWindow):
             self.statusBar.showMessage(f"Error reading geography file: {e}")
             print(f"Error reading geography file: {e}")
             print(traceback.format_exc())
+            return
+
+        if skipped:
+            print(f"getGeography: skipped {skipped} unparseable row(s) in {fullname}")
+
+        #  An empty result means every station will be dropped from the table,
+        #  and the status bar is overwritten moments later during start-up - so
+        #  say so in a way the operator cannot miss.
+        if not self.curr:
+            QMessageBox.warning(
+                self, "Geography File Unusable",
+                f"No usable stations were read from:\n{fullname}\n\n"
+                f"{skipped} row(s) could not be parsed.  The observation table "
+                f"will be empty until this file is fixed."
+            )
 
     def listDataFiles(self):
         """Get list of data files in the data directory"""
@@ -2326,30 +2425,50 @@ class MatchObsAllQC(QMainWindow):
             print(f"Error checking lat/lon limits: {e}")
 
     def readShapes(self):
-        """Read shape info (if lat/lon limits have changed)"""
-        if self.changedLatLonLimits:
-            try:
-                self.statusBar.showMessage("Updating location information for points")
-                geomKeys = list(self.curr.keys())
+        """Fill in self.geom for every station that needs it.
 
-                for stationId in list(self.static.keys()):
-                    areas = []
-                    if stationId in geomKeys:
-                        areas.append(self.curr[stationId][5])  # zone
-                        areas.append(self.curr[stationId][6])  # zone name
-                        areas.append(self.curr[stationId][4])  # state
-                        areas.append(self.curr[stationId][7])  # county
-                        areas.append(self.curr[stationId][8])  # county name
-                        areas.append(self.curr[stationId][9])  # cwa
-                        areas.append(self.curr[stationId][10]) # fire zone
-                        areas.append(self.curr[stationId][12]) # fire zone name
-                        self.geom[stationId] = areas
-                        self.changedLatLonLimits = False
-                    else:
-                        print(f"Skipping site {stationId} not in geometry file")
-            except Exception as e:
-                print(f"Error reading shapes: {e}")
-                print(traceback.format_exc())
+        This used to be gated on changedLatLonLimits - and cleared that flag
+        inside its own loop - so a station that started reporting inside the
+        existing lat/lon box never got a geom entry and was dropped from every
+        display until the app was restarted.  A limits change still forces a
+        full rebuild; otherwise only the stations we have no entry for are done.
+        """
+        try:
+            if self.changedLatLonLimits:
+                stations = list(self.static.keys())
+                self.changedLatLonLimits = False
+            else:
+                stations = [sid for sid in self.static if sid not in self.geom]
+
+            if not stations:
+                return
+
+            self.statusBar.showMessage("Updating location information for points")
+
+            notInGeom = []
+            for stationId in stations:
+                entry = self.curr.get(stationId)
+                if entry is None:
+                    notInGeom.append(stationId)
+                    continue
+
+                self.geom[stationId] = [
+                    entry[5],   # zone
+                    entry[6],   # zone name
+                    entry[4],   # state
+                    entry[7],   # county
+                    entry[8],   # county name
+                    entry[9],   # cwa
+                    entry[10],  # fire zone
+                    entry[12],  # fire zone name
+                ]
+
+            if notInGeom:
+                print(f"readShapes: {len(notInGeom)} station(s) not in the "
+                      f"geometry file, e.g. {', '.join(notInGeom[:5])}")
+        except Exception as e:
+            print(f"Error reading shapes: {e}")
+            print(traceback.format_exc())
 
     def readOneDataFile(self, fullname, datetime):
         """Read data from one raw datafile"""
@@ -2372,7 +2491,7 @@ class MatchObsAllQC(QMainWindow):
                     if stationId not in self.raw:
                         # New station - add static data
                         fielddata = []
-                        for field in range(self.numStaticFields):
+                        for field in range(self.numStaticAttrs):
                             fielddata.append(vals[field + 1] if field + 1 < len(vals) else "")
                         self.static[stationId] = fielddata
                         self.checkLatLonLimits(vals)
@@ -2390,9 +2509,13 @@ class MatchObsAllQC(QMainWindow):
                         if fieldI < len(vals):
                             self.raw[stationId][field][datetime] = vals[fieldI]
 
-            # Add stations to the allStations list
+            # Add stations to the allStations list.  The membership test used
+            # to scan the whole list per station, which is quadratic over a
+            # few thousand sites; the set keeps the list's order and type.
+            known = set(self.allStations)
             for stationId in self.raw:
-                if stationId not in self.allStations:
+                if stationId not in known:
+                    known.add(stationId)
                     self.allStations.append(stationId)
 
             # Print number of stations found
@@ -2431,7 +2554,7 @@ class MatchObsAllQC(QMainWindow):
                         # If new station - add static data if needed
                         if stationId not in self.raw:
                             fielddata = []
-                            for field in range(self.numStaticFields):
+                            for field in range(self.numStaticAttrs):
                                 fielddata.append(vals[field + 1] if field + 1 < len(vals) else "")
                             self.static[stationId] = fielddata
                             self.checkLatLonLimits(vals)
@@ -2454,9 +2577,13 @@ class MatchObsAllQC(QMainWindow):
                         if fieldI < len(vals) and vals[fieldI] != "*":
                             self.man[stationId][field][datetime] = vals[fieldI]
 
-            # Add stations to the allStations list
+            # Add stations to the allStations list.  The membership test used
+            # to scan the whole list per station, which is quadratic over a
+            # few thousand sites; the set keeps the list's order and type.
+            known = set(self.allStations)
             for stationId in self.man:
-                if stationId not in self.allStations:
+                if stationId not in known:
+                    known.add(stationId)
                     self.allStations.append(stationId)
 
             # Print number of stations found
@@ -2495,7 +2622,7 @@ class MatchObsAllQC(QMainWindow):
                         # If new station - add static data if needed
                         if stationId not in self.raw:
                             fielddata = []
-                            for field in range(self.numStaticFields):
+                            for field in range(self.numStaticAttrs):
                                 fielddata.append(vals[field + 1] if field + 1 < len(vals) else "")
                             self.static[stationId] = fielddata
                             self.checkLatLonLimits(vals)
@@ -2509,9 +2636,13 @@ class MatchObsAllQC(QMainWindow):
                         else:
                             self.all[stationId].append("*")
 
-            # Add stations to the allStations list
+            # Add stations to the allStations list.  The membership test used
+            # to scan the whole list per station, which is quadratic over a
+            # few thousand sites; the set keeps the list's order and type.
+            known = set(self.allStations)
             for stationId in self.all:
-                if stationId not in self.allStations:
+                if stationId not in known:
+                    known.add(stationId)
                     self.allStations.append(stationId)
 
             # Print number of stations found
@@ -2600,22 +2731,33 @@ class MatchObsAllQC(QMainWindow):
         self.updateSelectors()
 
     def updateSelectors(self):
-        """Update the time and station selector dropdowns"""
-        # Update time selector
-        self.timeSelector.clear()
-        for date in self.dates:
-            displayText = self.getTimeFromDateTime(date)
-            self.timeSelector.addItem(displayText, date)
+        """Repopulate the time and station dropdowns without firing signals.
 
-        # Update station selector with searchable functionality
+        clear() followed by the first addItem() moves the current index from -1
+        to 0, which emitted currentIndexChanged in the middle of a reload and
+        dragged the user back to the newest time before a single file had been
+        re-read.  Both selectors are rebuilt with signals blocked and the prior
+        selection restored if it still exists; the callers redisplay explicitly.
+        """
+        previousTime = self.timeSelector.currentData()
+
+        self.timeSelector.blockSignals(True)
+        try:
+            self.timeSelector.clear()
+            for date in self.dates:
+                self.timeSelector.addItem(self.getTimeFromDateTime(date), date)
+
+            if previousTime is not None:
+                index = self.timeSelector.findData(previousTime)
+                if index >= 0:
+                    self.timeSelector.setCurrentIndex(index)
+        finally:
+            self.timeSelector.blockSignals(False)
+
         allStations = sorted(self.allStations)
         self.stationSelector.setAllStations(allStations)
 
-        print(f"Added {len(allStations)} stations to searchable selector")
-        # Print the first few stations as a debug check
-        print("First 10 stations:")
-        for i in range(min(10, len(allStations))):
-            print(f"  {allStations[i]}")
+        dbg(f"Added {len(allStations)} stations to searchable selector")
 
     def getTimeFromDateTime(self, date):
         """Turn a YYYYMMDDHHMM date into a time string of MM/DD/YY HHZ"""
@@ -2719,7 +2861,6 @@ class MatchObsAllQC(QMainWindow):
     def getIdList(self, datetime):
         """Get list of station IDs in group/elevation order"""
         sortKeys = []
-        geomKeys = list(self.geom.keys())
 
         # Get sort direction (ascending=0, descending=1)
         sortDirection = self.sortDirOptions.checkedId()
@@ -2759,11 +2900,11 @@ class MatchObsAllQC(QMainWindow):
 
             # Skip this station if it has no data and no all.manual entries
             if not hasAnyData:
-                print(f"Skipping station {stationId} - no data or overrides")
+                dbg(f"Skipping station {stationId} - no data or overrides")
                 continue
 
             # Continue with the rest of the processing for stations with data
-            if stationId in geomKeys:
+            if stationId in self.geom:
                 try:
                     cwa = self.geom[stationId][5]
                     zone = self.geom[stationId][0]
@@ -2808,14 +2949,14 @@ class MatchObsAllQC(QMainWindow):
                             else:  # Descending
                                 tmpSortValue = f"{400-int(tmp):05d}"
                         else:
-                            tmpSortValue = f"1_0000"
+                            tmpSortValue = "1_0000"
 
                         if usingCwaFilter:
                             # When CWA filter is active: sort by CWA, zone, then value
-                            sortKey = f"{cwaSort}-{zoneSort}-{tmpSortValue}-{stationId}"
+                            sortKey = f"{cwaSort}-{zoneSort}-{tmpSortValue}"
                         else:
                             # When no CWA filter: sort only by value
-                            sortKey = f"{tmpSortValue}-{stationId}"
+                            sortKey = tmpSortValue
 
                     elif sortOpt == 5:  # Elevation sort
                         try:
@@ -2831,66 +2972,44 @@ class MatchObsAllQC(QMainWindow):
 
                         if usingCwaFilter:
                             # When CWA filter is active: sort by CWA, zone, then elevation
-                            sortKey = f"{cwaSort}-{zoneSort}-{elevSortValue}-{stationId}"
+                            sortKey = f"{cwaSort}-{zoneSort}-{elevSortValue}"
                         else:
                             # When no CWA filter: sort only by elevation
-                            sortKey = f"{elevSortValue}-{stationId}"
+                            sortKey = elevSortValue
 
                     if sortOpt == 6:  # ID-based sort
-                        sortKey = stationId
+                        #  The ID itself is the tiebreaker in the tuple below,
+                        #  so the key only has to carry the grouping.
+                        sortKey = f"{cwaSort}-{zoneSort}" if usingCwaFilter else ""
 
-                        if usingCwaFilter:
-                            sortKey = f"{cwaSort}-{zoneSort}-{sortKey}"
-
-                    sortKeys.append(sortKey)
+                    #  Carry the station ID beside the key rather than encoded
+                    #  into it.  Recovering it with split("-")[-1] truncated any
+                    #  ID containing a hyphen (e.g. the CoCoRaHS "ID-AD-24"
+                    #  form), which then blew up the render with a KeyError.
+                    sortKeys.append((sortKey, stationId))
                 except (IndexError, ValueError) as e:
                     print(f"Error processing station {stationId} in getIdList: {e}")
             else:
-                print(f"Skipping site {stationId} not in geometry file")
+                dbg(f"Skipping site {stationId} not in geometry file")
 
         sortKeys.sort()
-        idList = []
 
         if sortOpt == 6 and sortDirection == 1:
-            # Group sortKeys by CWA-zone if using CWA filter
-            if usingCwaFilter:
-                # Group by CWA-zone
-                grouped_keys = {}
-                for sortKey in sortKeys:
-                    parts = sortKey.split("-")
-                    if len(parts) >= 3:
-                        # Extract the CWA-zone part and station ID
-                        cwa_zone = f"{parts[0]}-{parts[1]}"
-                        station_id = parts[2]
+            #  Descending ID sort: flip the IDs within each group while leaving
+            #  the groups themselves in ascending order.  With no CWA filter the
+            #  key is "" for everything, so this is one group - which is exactly
+            #  the plain reverse sort the old code did in that case.
+            grouped = {}
+            for key, stationId in sortKeys:
+                grouped.setdefault(key, []).append(stationId)
 
-                        if cwa_zone not in grouped_keys:
-                            grouped_keys[cwa_zone] = []
-                        grouped_keys[cwa_zone].append(station_id)
+            sortKeys = [
+                (key, stationId)
+                for key in sorted(grouped)
+                for stationId in sorted(grouped[key], reverse=True)
+            ]
 
-                # Sort station IDs within each group in reverse order
-                for cwa_zone in grouped_keys:
-                    grouped_keys[cwa_zone].sort(reverse=True)
-
-                # Reconstruct the sorted list maintaining CWA-zone order
-                sortKeys = []
-                for cwa_zone in sorted(grouped_keys.keys()):
-                    for station_id in grouped_keys[cwa_zone]:
-                        sortKeys.append(f"{cwa_zone}-{station_id}")
-            else:
-                # If no CWA filter, just reverse the sorted order of station IDs
-                sortKeys.sort(reverse=True)
-
-        for sortKey in sortKeys:
-            try:
-                parts = sortKey.split("-")
-                # Get the station ID from the last part of the sort key
-                stationId = parts[-1]
-                idList.append(stationId)
-
-            except Exception as e:
-                print(f"Error parsing sort key {sortKey}: {e}")
-
-        return idList
+        return [stationId for _key, stationId in sortKeys]
 
     def getVals(self, stationId, fieldIndex):
         """Get raw, manual, and all values for a specific station and field index"""
@@ -2923,8 +3042,8 @@ class MatchObsAllQC(QMainWindow):
         try:
             with open(fullname, "w") as datafile:
                 # Debug: Print the data structure
-                print(f"Writing to {fullname}")
-                print(f"Field order: ID, name, lat, lon, elev, tmp, dew, dir, spd, gst")
+                dbg(f"Writing to {fullname}")
+                dbg(f"Field order: ID, name, lat, lon, elev, tmp, dew, dir, spd, gst")
 
                 for stationId in sorted(self.man.keys()):
                     # Check if there's any manual override specifically for this datetime
@@ -2933,7 +3052,7 @@ class MatchObsAllQC(QMainWindow):
                         fieldData = self.man[stationId][fieldIndex]
                         if datetime in fieldData and fieldData[datetime] != "*":
                             hasOverride = True
-                            print(f"  Station {stationId} has override for field {fieldIndex} ({self.variableFields[fieldIndex]['id']}): '{fieldData[datetime]}'")
+                            dbg(f"  Station {stationId} has override for field {fieldIndex} ({self.variableFields[fieldIndex]['id']}): '{fieldData[datetime]}'")
                             break
 
                     if not hasOverride:
@@ -2948,16 +3067,16 @@ class MatchObsAllQC(QMainWindow):
                         # Ensure we only take the first 4 static fields (name, lat, lon, elev)
                         for i in range(min(4, len(self.static[stationId]))):
                             field_list.append(self.static[stationId][i])
-                            print(f"  Adding static field {i+1}: '{self.static[stationId][i]}'")
+                            dbg(f"  Adding static field {i+1}: '{self.static[stationId][i]}'")
 
                         # If we have fewer than 4 static fields, add placeholders
                         while len(field_list) < 5:  # ID + 4 static fields = 5
                             field_list.append("Unknown")
-                            print(f"  Adding placeholder static field")
+                            dbg(f"  Adding placeholder static field")
                     else:
                         # Add placeholders for all static fields
                         field_list.extend(["Unknown"] * 4)  # 4 static fields
-                        print(f"  Adding 4 placeholder static fields")
+                        dbg(f"  Adding 4 placeholder static fields")
 
                     # Add variable data fields
                     for fieldIndex in range(self.numVariableFields):
@@ -2966,7 +3085,7 @@ class MatchObsAllQC(QMainWindow):
                             fieldData = self.man[stationId][fieldIndex]
                             if datetime in fieldData:
                                 value = fieldData[datetime]
-                                print(f"  Adding override for field {field_id}: '{value}'")
+                                dbg(f"  Adding override for field {field_id}: '{value}'")
                             else:
                                 value = "*"
                         else:
@@ -2977,8 +3096,8 @@ class MatchObsAllQC(QMainWindow):
                     outline = ",".join(field_list) + "\n"
 
                     # Debug output
-                    print(f"Writing line: {outline.strip()}")
-                    print(f"Field count: {len(field_list)}")
+                    dbg(f"Writing line: {outline.strip()}")
+                    dbg(f"Field count: {len(field_list)}")
 
                     datafile.write(outline)
 
@@ -3008,8 +3127,8 @@ class MatchObsAllQC(QMainWindow):
         try:
             with open(fullname, "w") as datafile:
                 # Debug: Print the data structure
-                print(f"Writing to {fullname}")
-                print(f"Field order: ID, name, lat, lon, elev, tmp, dew, dir, spd, gst")
+                dbg(f"Writing to {fullname}")
+                dbg(f"Field order: ID, name, lat, lon, elev, tmp, dew, dir, spd, gst")
 
                 for stationId in sorted(self.all.keys()):
                     # Check if there's any non-default data
@@ -3031,22 +3150,22 @@ class MatchObsAllQC(QMainWindow):
                         # Ensure we only take the first 4 static fields (name, lat, lon, elev)
                         for i in range(min(4, len(self.static[stationId]))):
                             field_list.append(self.static[stationId][i])
-                            print(f"  Adding static field {i+1}: '{self.static[stationId][i]}'")
+                            dbg(f"  Adding static field {i+1}: '{self.static[stationId][i]}'")
 
                         # If we have fewer than 4 static fields, add placeholders
                         while len(field_list) < 5:  # ID + 4 static fields = 5
                             field_list.append("Unknown")
-                            print(f"  Adding placeholder static field")
+                            dbg(f"  Adding placeholder static field")
                     else:
                         # Add placeholders for all static fields
                         field_list.extend(["Unknown"] * 4)  # 4 static fields
-                        print(f"  Adding 4 placeholder static fields")
+                        dbg(f"  Adding 4 placeholder static fields")
 
                     # Add variable data fields
                     for fieldIndex in range(self.numVariableFields):
                         if fieldIndex < len(self.all[stationId]):
                             value = self.all[stationId][fieldIndex]
-                            print(f"  Adding override for field {self.variableFields[fieldIndex]['id']}: '{value}'")
+                            dbg(f"  Adding override for field {self.variableFields[fieldIndex]['id']}: '{value}'")
                         else:
                             value = "*"  # Default value
                         field_list.append(value)
@@ -3055,8 +3174,8 @@ class MatchObsAllQC(QMainWindow):
                     outline = ",".join(field_list) + "\n"
 
                     # Debug output
-                    print(f"Writing line: {outline.strip()}")
-                    print(f"Field count: {len(field_list)}")
+                    dbg(f"Writing line: {outline.strip()}")
+                    dbg(f"Field count: {len(field_list)}")
 
                     datafile.write(outline)
 
@@ -3104,8 +3223,11 @@ class MatchObsAllQC(QMainWindow):
             except (ValueError, IndexError):
                 self.stationInfoLabel.setText(f"{stationId}")
 
-            # Clear the table
+            # Clear the table.  clear() does not drop merged cells, so a span
+            # set for a zone header on a previous render would otherwise land on
+            # an unrelated data row and swallow its columns.
             self.dataTable.clear()
+            self.dataTable.clearSpans()
             self.dataTable.setRowCount(0)
 
             # Set up table headers
@@ -3266,8 +3388,11 @@ class MatchObsAllQC(QMainWindow):
             if index >= 0:
                 self.timeSelector.setCurrentIndex(index)
 
-            # Clear the table
+            # Clear the table.  clear() does not drop merged cells, so a span
+            # set for a zone header on a previous render would otherwise land on
+            # an unrelated data row and swallow its columns.
             self.dataTable.clear()
+            self.dataTable.clearSpans()
             self.dataTable.setRowCount(0)
 
             # Get the stations in order
@@ -3348,7 +3473,7 @@ class MatchObsAllQC(QMainWindow):
             if self.issuesOnlyCb.isChecked():
                 stations = [
                     sid for sid in stations
-                    if self._stationHasIssues(sid, unchangedValues)
+                    if self._stationHasIssues(sid, unchangedValues, datetime)
                 ]
 
             # Group dictionary to track current group
