@@ -10,6 +10,11 @@ Author: Korri Anderson
 Version 2.1 - Uses PySide2 instead of Tkinter, also allows for better sorting features.
 Version 2.2 - Pyside6 - AWIPS 23.4.2
 Version 2.3 - Added support for Adwaita-dark theme.
+Version 2.4 - Data-integrity fixes: "*" placeholders no longer count as
+              overrides, the .manual readers drop entries the files no longer
+              contain, "Select None" on the CWA filter hides every station, and
+              rebuilding that filter keeps the forecaster's selection.  Added
+              Stations > Clear Ignore-All for Non-Reporting Stations.
 
 """
 
@@ -393,7 +398,7 @@ class MatchObsAllQC(QMainWindow):
         super().__init__()
 
         # Window setup
-        self.setWindowTitle("MatchObsAllQC 2.3")
+        self.setWindowTitle("MatchObsAllQC 2.4")
         self.resize(1200, 1200)
 
         # Initialize data structures
@@ -810,10 +815,20 @@ class MatchObsAllQC(QMainWindow):
         if set(self.availableCwas) != set(self.cwaCheckboxes.keys()):
             print(f"Updating CWA filter with {len(self.availableCwas)} CWAs")
 
-            # Clear existing checkboxes
-            for i in reversed(range(self.cwaCheckboxLayout.count())):
-                widget = self.cwaCheckboxLayout.itemAt(i).widget()
-                if widget:
+            #  Remember what was checked.  A rebuild used to tick every box and
+            #  overwrite selectedCwas, so the first station arriving from a new
+            #  CWA threw away the forecaster's filter mid-QC.
+            previousCwas = set(self.cwaCheckboxes.keys())
+            previouslyChecked = set(
+                cwa for cwa, box in self.cwaCheckboxes.items() if box.isChecked()
+            )
+
+            #  Empty the layout properly.  deleteLater() on widgets alone left the
+            #  addStretch() spacer behind and a new one was appended each rebuild.
+            while self.cwaCheckboxLayout.count():
+                item = self.cwaCheckboxLayout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
                     widget.deleteLater()
 
             self.cwaCheckboxes = {}
@@ -821,7 +836,10 @@ class MatchObsAllQC(QMainWindow):
             # Create new checkboxes in a horizontal layout
             for cwa in self.availableCwas:
                 checkbox = QCheckBox(cwa)
-                checkbox.setChecked(True)  # Default to selected
+                #  Keep the previous state.  A CWA that is new since the last
+                #  build (including every CWA on the first build) starts checked.
+                checkbox.setChecked(cwa not in previousCwas
+                                    or cwa in previouslyChecked)
                 checkbox.stateChanged.connect(self.onCwaFilterChanged)
 
                 # Make the checkbox more compact
@@ -834,8 +852,8 @@ class MatchObsAllQC(QMainWindow):
             # Add a stretch at the end to prevent spreading checkboxes too far apart
             self.cwaCheckboxLayout.addStretch(1)
 
-            # Update selected CWAs
-            self.selectedCwas = self.availableCwas.copy()
+            # Update selected CWAs from the boxes we just restored
+            self.updateSelectedCwas()
 
     def onCwaFilterChanged(self):
         """Handle changes to CWA filter checkboxes"""
@@ -904,6 +922,18 @@ class MatchObsAllQC(QMainWindow):
             self.ignoreNonReportingStations
         )
         stationsMenu.addAction(ignoreNonReportingAction)
+
+        clearIgnoreAllAction = QAction(
+            "Clear Ignore-All for Non-Reporting Stations...", self
+        )
+        clearIgnoreAllAction.setToolTip(
+            "Remove the all.manual ignore-all entry for stations with zero raw "
+            "observations across the loaded period.  Per-time QC is untouched."
+        )
+        clearIgnoreAllAction.triggered.connect(
+            self.clearIgnoreAllForNonReporting
+        )
+        stationsMenu.addAction(clearIgnoreAllAction)
 
         # Run menu
         runMenu = self.menuBar().addMenu("&Run")
@@ -1934,22 +1964,105 @@ class MatchObsAllQC(QMainWindow):
                     and all(v == "" for v in self.all[stationId])):
                 continue
 
-            hasAnyData = False
-            if stationId in self.raw:
-                for fieldIndex in range(self.numVariableFields):
-                    if fieldIndex < len(self.raw[stationId]):
-                        rawList = self.raw[stationId][fieldIndex]
-                        for value in rawList.values():
-                            if value.strip():
-                                hasAnyData = True
-                                break
-                    if hasAnyData:
-                        break
-
-            if not hasAnyData:
+            if self.stationHasNoObs(stationId):
                 nonReporting.append(stationId)
 
         return sorted(nonReporting)
+
+    def stationHasNoObs(self, stationId):
+        """True when a station has no non-blank raw observation anywhere in the
+        loaded period."""
+        if stationId not in self.raw:
+            return True
+
+        for fieldIndex in range(self.numVariableFields):
+            if fieldIndex < len(self.raw[stationId]):
+                for value in self.raw[stationId][fieldIndex].values():
+                    if value.strip():
+                        return False
+
+        return True
+
+    def findNonReportingIgnoreAlls(self):
+        """Return station IDs that carry an all.manual entry but have no raw
+        observations anywhere in the loaded period.
+
+        These are ignore-all rows left behind by stations that have since gone
+        silent - the entry is no longer suppressing anything.
+        """
+        return sorted(sid for sid in self.all if self.stationHasNoObs(sid))
+
+    def clearIgnoreAllForNonReporting(self):
+        """Remove the all.manual entry for every station with no raw obs in the
+        loaded period, after confirmation.  Per-time QC is left alone."""
+        try:
+            candidates = self.findNonReportingIgnoreAlls()
+        except Exception as e:
+            print(f"Error scanning for stale ignore-all entries: {e}")
+            print(traceback.format_exc())
+            QMessageBox.warning(
+                self, "Scan Error",
+                f"Error scanning for stale ignore-all entries:\n{str(e)}"
+            )
+            return
+
+        if not candidates:
+            QMessageBox.information(
+                self, "No Stale Ignore-All Entries",
+                "Every station with an all.manual entry has reported at least "
+                "once in the loaded period."
+            )
+            return
+
+        # Build a preview list (cap so the dialog stays sane)
+        previewLimit = 40
+        previewIds = candidates[:previewLimit]
+        more = len(candidates) - len(previewIds)
+        previewText = "\n".join(previewIds)
+        if more > 0:
+            previewText += f"\n... and {more} more"
+
+        msg = (
+            f"Found {len(candidates)} station(s) with an all.manual entry but "
+            f"NO raw observations across the entire loaded period.\n\n"
+            f"Their ignore-all entries will be removed from all.manual.  "
+            f"Per-time QC in the hourly .manual files is left alone.\n\n"
+            f"Stations:\n{previewText}\n\n"
+            f"Proceed?"
+        )
+
+        response = QMessageBox.question(
+            self, "Clear Ignore-All for Non-Reporting Stations",
+            msg,
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel
+        )
+
+        if response != QMessageBox.Yes:
+            return
+
+        # Snapshot prior state for every affected station
+        prev_rows = {sid: list(self.all[sid]) for sid in candidates}
+
+        def restore():
+            for sid, prev in prev_rows.items():
+                self.all[sid] = list(prev)
+            self.writeAllFile()
+
+        self._pushUndo(
+            f"Clear ignore-all on {len(candidates)} non-reporting station(s)",
+            restore
+        )
+
+        for stationId in candidates:
+            self.all.pop(stationId, None)
+
+        self.writeAllFile()
+        self.redisplay()
+        self.statusBar.showMessage(
+            f"Cleared ignore-all on {len(candidates)} non-reporting station(s)",
+            5000
+        )
 
     def ignoreNonReportingStations(self):
         """Find every station with no raw obs in the loaded period and
@@ -2295,6 +2408,13 @@ class MatchObsAllQC(QMainWindow):
 
         try:
             with open(fullname, "r") as datafile:
+                #  Same reason as readAllFile: this file is the complete set of
+                #  overrides for its time, so an entry someone else deleted must
+                #  not survive in memory and get written back on the next QC action.
+                for fieldData in self.man.values():
+                    for field in fieldData:
+                        field.pop(datetime, None)
+
                 for line in datafile:
                     if line.startswith("#"):
                         continue
@@ -2323,10 +2443,15 @@ class MatchObsAllQC(QMainWindow):
                             fielddata.append(data)
                         self.man[stationId] = fielddata
 
-                    # Store the manual data
+                    # Store the manual data.  "*" is the no-override placeholder
+                    # writeManFile emits for fields a station was never QC'd on;
+                    # storing it made an untouched field look like a real override,
+                    # so cancelling one ignore left a row of all-"*" values behind
+                    # that could never be removed.  Absent and "*" already behave
+                    # identically everywhere the value is read.
                     for field in range(self.numVariableFields):
                         fieldI = field + self.dataFieldStart
-                        if fieldI < len(vals):
+                        if fieldI < len(vals) and vals[fieldI] != "*":
                             self.man[stationId][field][datetime] = vals[fieldI]
 
             # Add stations to the allStations list
@@ -2347,6 +2472,13 @@ class MatchObsAllQC(QMainWindow):
 
         try:
             with open(fullname, "r") as datafile:
+                #  The file is the complete set of ignore-alls.  Without dropping
+                #  what we already hold, a station another workstation removed
+                #  from all.manual survived in memory and writeAllFile put it
+                #  straight back, silently undoing their change.  Cleared after
+                #  the open succeeds so a read error leaves state untouched.
+                self.all = {}
+
                 for line in datafile:
                     if line.startswith("#"):
                         continue
@@ -2598,7 +2730,10 @@ class MatchObsAllQC(QMainWindow):
         includedStations = []
 
         # Check if any CWAs are selected
-        usingCwaFilter = len(self.selectedCwas) > 0
+        #  Filter whenever the CWA filter exists at all.  Keying off
+        #  selectedCwas made an empty selection mean "no filter", so "Select
+        #  None" showed every station - identical to "Select All".
+        usingCwaFilter = len(self.cwaCheckboxes) > 0
 
         for stationId in list(self.static.keys()):
             # Skip stations with no data and no all.manual entries
@@ -2796,7 +2931,7 @@ class MatchObsAllQC(QMainWindow):
                     hasOverride = False
                     for fieldIndex in range(self.numVariableFields):
                         fieldData = self.man[stationId][fieldIndex]
-                        if datetime in fieldData:
+                        if datetime in fieldData and fieldData[datetime] != "*":
                             hasOverride = True
                             print(f"  Station {stationId} has override for field {fieldIndex} ({self.variableFields[fieldIndex]['id']}): '{fieldData[datetime]}'")
                             break
@@ -3096,7 +3231,7 @@ class MatchObsAllQC(QMainWindow):
                 row += 1
 
             # Update title and status
-            self.setWindowTitle(f"MatchObsAllQC 2.3 - {stationId}")
+            self.setWindowTitle(f"MatchObsAllQC 2.4 - {stationId}")
             self.statusBar.showMessage(f"Viewing data for {stationId}")
 
             # Set a reasonable width for the table
@@ -3163,7 +3298,7 @@ class MatchObsAllQC(QMainWindow):
             self.dataTable.setHorizontalHeaderLabels(headers)
 
             # Determine if we should show zone headers
-            showZoneHeaders = len(self.selectedCwas) > 0
+            showZoneHeaders = len(self.availableCwas) > 0
 
             # Check for unchanged values across all dates - NEW CODE
             unchangedValues = {}  # Dictionary to track stations with unchanged values by field
@@ -3450,7 +3585,7 @@ class MatchObsAllQC(QMainWindow):
 
             # Update title and status
             formattedTime = self.getSplitTime(datetime)
-            self.setWindowTitle(f"MatchObsAllQC 2.3 - {formattedTime}")
+            self.setWindowTitle(f"MatchObsAllQC 2.4 - {formattedTime}")
             self.statusBar.showMessage(f"Viewing data for {self.getTimeFromDateTime(datetime)}")
 
             # Set a reasonable width for the table
