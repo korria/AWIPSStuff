@@ -11,7 +11,9 @@
 # Author: Tom LeFebvre
 # Maintainer: Jonathan Lamb (WFO CHS)
 #
-# Version 2.6.1 - 27 Apr 2022
+# 2026/09/02 - version 3.0 KA. Keep the hourly model curve anchored
+#          to Official MinT/MaxT; defer cycle-time defaults to the GFE clock.
+#         2.6.1 - 27 Apr 2022
 #
 # ----------------------------------------------------------------------------
 
@@ -23,7 +25,6 @@
 MenuItems = ["Nowhere"]
 
 import SmartScript
-import time
 
 ## Local configuration definitions.  These values will override the
 ## values defined in the Diurnal procedure.
@@ -49,7 +50,7 @@ configDict["lastResort"] = "GFS"
 # the hourly grids (True) or the min/max grids fetched from the model
 # If set to False, the tool will use the model min/max grids in the
 # database where/when it is lower/higher than the hourly min/max.
-configDict["useHourlyMinMax"] = False
+configDict["useHourlyMinMax"] = True
 
 # Previous versions and model substitutes will be color coded
 # based on this list.  If the first sub was made the first color
@@ -66,15 +67,13 @@ configDict["DEBUG"] = False  # set this to True to see the intermediate grids
 # The list of selected elements when the GUI appears
 configDict["weList"] = ["T", "RH"]  
 
-if time.gmtime()[3]<12:
-   configDict["startTime"] = "M1"
-else:
-   configDict["startTime"] = "M2 D1"    
+configDict["startTime"] = "Current Cycle"
 configDict["endTime"] = "M15 D14"
 
 # Set this to 1 if you want Diurnal to adjust for Daylight Saving Time
 # Set to 0 for no adjustment.
 configDict["adjustDST"] = 0
+configDict["timeZone"] = "America/Boise"
 
 # Set this to True if you want the option to exclude particular
 # days of Obs-like data.
@@ -134,4 +133,3 @@ class Procedure (SmartScript.SmartScript):
     def execute(self):
 
         return
-
