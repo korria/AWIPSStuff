@@ -7,8 +7,6 @@ Tim Barker's MatchObsAllQC program.
 
 Author: Korri Anderson
 
-Version history, newest first.  (Releases before 2.4 were not dated.)
-
 2026/08/27 - version 2.5. KA. Concurrent-write safety.  Every save rewrites the
              whole file from memory, so a save from another workstation between
              this session's last read and its next write was silently discarded.
@@ -32,9 +30,9 @@ Version history, newest first.  (Releases before 2.4 were not dated.)
              Overrides must be numeric and non-blank.  Added Stations > Clear
              Ignore-All for Non-Reporting Stations.  Per-station debug output is
              behind MOAQC_DEBUG.
-  (undated) - version 2.3. KA. Added support for Adwaita-dark theme.
-  (undated) - version 2.2. KA. PySide6 - AWIPS 23.4.2.
-  (undated) - version 2.1. KA. Uses PySide2 instead of Tkinter, also allows for
+2025/06/02 - version 2.3. KA. Added support for Adwaita-dark theme.
+2025/04/24 - version 2.2. KA. PySide6 - AWIPS 23.4.2.
+2025/03/18 - version 2.1. KA. Uses PySide2 instead of Tkinter, also allows for
              better sorting features.
 
 """
