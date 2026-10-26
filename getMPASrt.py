@@ -11,31 +11,35 @@ HISTORY:
   - 2025-09-07 - Update to MPASrn3
   - 2025-12-09 - Added wgrib2 clipping for Pacific Northwest
   - 2026-01-14 - Refactored: state tracking, resume capability, proper logging
+  - 2026-10-26 - Switch from SFTP to the NSSL THREDDS archive (one .tar per
+                 cycle over HTTPS); stream the tar and gunzip grib2 members
+                 on the fly. Drops the paramiko dependency.
 """
 import os
+import re
+import gzip
 import sys
 import json
 import time
 import shutil
 import socket
 import logging
+import tarfile
 import subprocess
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta
-from contextlib import contextmanager
-
-sys.path.insert(0, '/ldad/localapps/getMPASRT/lib')
-import paramiko
 
 # =============================================================================
 # Configuration
 # =============================================================================
 
-# SFTP Connection
-HOST = 'cftp.nssl.noaa.gov'
-PORT = 2222
-USERNAME = ''
-PASSWORD = ''
-REMOTE_DIR = '/realtime/'
+# THREDDS archive: one tar per cycle, e.g. .../2026/26102600_mpasrn.tar
+# Catalog: https://data.nssl.noaa.gov/thredds/catalog/FRDD/NSSL-MPAS/2026/catalog.html
+TAR_URL = ('https://data.nssl.noaa.gov/thredds/fileServer/FRDD/NSSL-MPAS/'
+           '{year}/{yymmddhh}_{run}.tar')
+RUN_NAME = 'mpasrn'          # also on the server: mpasht2 (00/06/12/18Z)
+USER_AGENT = 'Mozilla/5.0'
 
 # Local Paths
 BASE_DIR = '/ldad/localapps/getMPASRT'
@@ -50,12 +54,17 @@ MIN_LON, MAX_LON = 1, 750
 MIN_LAT, MAX_LAT = 1, 1059
 
 # Processing Configuration
-FORECAST_HOURS = 84          # f00 through f84
+FORECAST_HOURS = 84          # f01 through f84
 DAYS_TO_CHECK = 2            # Check today and yesterday
 CYCLES = ['00', '12']
 MAX_RETRIES = 3
-RETRY_DELAY = 5              # seconds
+RETRY_DELAY = 60             # seconds
 STATE_RETENTION_DAYS = 7     # Prune state older than this
+
+# Forecast hour from a tar member name, e.g.
+# "./2026102600/mpasrn_nssl_2026102600f07.grib2.gz" (members are gzipped;
+# the empty "..._ready" marker files are skipped)
+FHR_RE = re.compile(r'f(\d{2,3})\.grib2\.gz$')
 
 # =============================================================================
 # Logging Setup
@@ -131,43 +140,6 @@ def cleanup_local_directory():
             log.warning(f"Failed to remove {fname}: {e}")
 
 # =============================================================================
-# SFTP Connection
-# =============================================================================
-
-@contextmanager
-def sftp_connection():
-    """Context manager for SFTP connections with automatic cleanup."""
-    transport = None
-    sftp = None
-    try:
-        log.info(f"Connecting to {HOST}:{PORT}")
-        transport = paramiko.Transport((HOST, PORT))
-        transport.connect(username=USERNAME, password=PASSWORD)
-        sftp = paramiko.SFTPClient.from_transport(transport)
-        yield sftp
-    finally:
-        if sftp:
-            try:
-                sftp.close()
-            except Exception:
-                pass
-        if transport:
-            try:
-                transport.close()
-            except Exception:
-                pass
-        log.debug("SFTP connection closed")
-
-
-def reconnect_sftp():
-    """Create a new SFTP connection (for use in retry logic)."""
-    log.info(f"Reconnecting to {HOST}:{PORT}")
-    transport = paramiko.Transport((HOST, PORT))
-    transport.connect(username=USERNAME, password=PASSWORD)
-    sftp = paramiko.SFTPClient.from_transport(transport)
-    return sftp, transport
-
-# =============================================================================
 # File Processing
 # =============================================================================
 
@@ -191,46 +163,34 @@ def clip_to_pnw(input_path, output_path):
     return result
 
 
-def download_and_process_file(sftp, remote_file, local_file):
+def process_member(tar, member, local_file):
     """
-    Download a single file, clip it, and move to target directory.
+    Extract and gunzip one grib2 member from the tar stream, clip it, and move it to
+    the target directory.
 
-    Returns True on success, False on failure.
+    Returns True on success, False if wgrib2 failed. Network/tar errors
+    propagate so the caller can retry the cycle.
     """
     temp_path = os.path.join(LOCAL_DIRECTORY, f"full_{local_file}")
     clipped_path = os.path.join(LOCAL_DIRECTORY, local_file)
     final_path = os.path.join(TARGET_DIRECTORY, local_file)
 
     try:
-        # Download from SFTP
-        sftp.get(os.path.join(REMOTE_DIR, remote_file), temp_path)
-        log.debug(f"Downloaded {remote_file}")
+        with gzip.GzipFile(fileobj=tar.extractfile(member)) as src, \
+                open(temp_path, 'wb') as dst:
+            shutil.copyfileobj(src, dst, 1024 * 1024)
 
-        # Clip to PNW region
         clip_to_pnw(temp_path, clipped_path)
-        log.debug(f"Clipped {local_file}")
-
-        # Move to AWIPS incoming directory
         shutil.move(clipped_path, final_path)
-        log.info(f"Processed {remote_file} -> {final_path}")
-
+        log.info(f"Processed {member.name} -> {final_path}")
         return True
 
     except subprocess.CalledProcessError as e:
         stderr = e.stderr.decode() if e.stderr else 'Unknown error'
-        log.error(f"wgrib2 clip failed for {remote_file}: {stderr}")
+        log.error(f"wgrib2 clip failed for {member.name}: {stderr}")
         return False
 
-    except IOError as e:
-        log.error(f"I/O error processing {remote_file}: {e}")
-        raise  # Re-raise to trigger reconnection logic
-
-    except Exception as e:
-        log.error(f"Unexpected error processing {remote_file}: {e}")
-        raise
-
     finally:
-        # Always clean up temp files
         for path in (temp_path, clipped_path):
             if os.path.exists(path):
                 try:
@@ -238,100 +198,85 @@ def download_and_process_file(sftp, remote_file, local_file):
                 except OSError:
                     pass
 
-# =============================================================================
-# Cycle Processing
-# =============================================================================
 
-def cycle_available(sftp, prefix):
-    """Check if a complete cycle is available on the server."""
-    test_file = f'{prefix}f{FORECAST_HOURS - 1:02d}.grib2'
+def open_cycle_tar(date, hour):
+    """
+    Open the cycle's tar over HTTPS. Returns the response, or None if the
+    cycle isn't on the server yet.
+    """
+    url = TAR_URL.format(year=date.strftime('%Y'),
+                         yymmddhh=date.strftime('%y%m%d') + hour,
+                         run=RUN_NAME)
+    req = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
     try:
-        sftp.stat(os.path.join(REMOTE_DIR, test_file))
-        return True
-    except FileNotFoundError:
-        return False
+        return urllib.request.urlopen(req)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
 
 
-def process_cycle(sftp_holder, date_str, hour, state):
+def stream_cycle(resp, cycle_id, local_prefix, state):
+    """
+    Walk the tar stream once, processing every wanted forecast hour not
+    already in state. Returns the number of newly processed hours.
+    """
+    # ponytail: a retry re-streams the whole tar (~8 GB) and skips done
+    # members; resume via HTTP Range at member offsets if bandwidth matters.
+    done = 0
+    with tarfile.open(fileobj=resp, mode='r|') as tar:
+        for member in tar:
+            match = FHR_RE.search(member.name) if member.isfile() else None
+            if not match:
+                log.debug(f"Skipping tar member {member.name}")
+                continue
+
+            fhr = int(match.group(1))
+            if not 1 <= fhr <= FORECAST_HOURS or fhr in state[cycle_id]:
+                continue
+
+            local_file = f'LDAD-GRIB-{local_prefix}f{fhr:03d}.grib2'
+            if process_member(tar, member, local_file):
+                state[cycle_id].append(fhr)
+                save_state(state)
+                done += 1
+    return done
+
+
+def process_cycle(date, hour, state):
     """
     Process all forecast hours for a single model cycle.
 
-    sftp_holder is a mutable dict {'sftp': sftp, 'transport': transport}
-    so we can reconnect if needed.
-
     Returns True if cycle is complete, False otherwise.
     """
+    date_str = date.strftime('%Y%m%d')
     cycle_id = f"{date_str}{hour}"
-    prefix = f'mpasrn3_nssl_{date_str}{hour}'
     local_prefix = f'mpasrt4nssl_{date_str}{hour}'
 
-    sftp = sftp_holder['sftp']
+    state.setdefault(cycle_id, [])
 
-    # Check if cycle exists on server
-    if not cycle_available(sftp, prefix):
-        log.debug(f"Cycle {cycle_id} not available yet")
-        return False
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = open_cycle_tar(date, hour)
+            if resp is None:
+                log.debug(f"Cycle {cycle_id} not available yet")
+                return False
 
-    log.info(f"Processing cycle {cycle_id}")
+            log.info(f"Processing cycle {cycle_id} from {resp.url}")
+            with resp:
+                stream_cycle(resp, cycle_id, local_prefix, state)
+            break
 
-    # Initialize state for this cycle if needed
-    if cycle_id not in state:
-        state[cycle_id] = []
+        except (urllib.error.URLError, tarfile.TarError,
+                socket.error, IOError) as e:
+            log.warning(f"Attempt {attempt}/{MAX_RETRIES} for {cycle_id} failed: {e}")
+            if attempt == MAX_RETRIES:
+                raise
+            time.sleep(RETRY_DELAY)
 
-    success_count = len(state[cycle_id])  # Count already-processed files
-
-    for fhr in range(1,FORECAST_HOURS+1): #skip hour 0
-        # Skip if already downloaded
-        if fhr in state[cycle_id]:
-            log.debug(f"Skipping {cycle_id} f{fhr:02d} (already processed)")
-            continue
-
-        remote_file = f'{prefix}f{fhr:02d}.grib2'
-        local_file = f'LDAD-GRIB-{local_prefix}f{fhr:03d}.grib2'
-
-        for attempt in range(MAX_RETRIES):
-            try:
-                if download_and_process_file(sftp_holder['sftp'], remote_file, local_file):
-                    success_count += 1
-                    state[cycle_id].append(fhr)
-                    save_state(state)
-                    break
-                else:
-                    # Clip failed but connection is okay, retry
-                    log.warning(f"Attempt {attempt + 1}/{MAX_RETRIES} failed for {remote_file}")
-                    time.sleep(RETRY_DELAY)
-
-            except (IOError, paramiko.SSHException, socket.error) as e:
-                # Connection issue - try to reconnect
-                log.warning(f"Connection error on {remote_file}: {e}")
-                time.sleep(RETRY_DELAY)
-
-                try:
-                    # Close old connection
-                    try:
-                        sftp_holder['sftp'].close()
-                        sftp_holder['transport'].close()
-                    except Exception:
-                        pass
-
-                    # Reconnect
-                    new_sftp, new_transport = reconnect_sftp()
-                    sftp_holder['sftp'] = new_sftp
-                    sftp_holder['transport'] = new_transport
-                    log.info("Reconnected successfully")
-
-                except Exception as reconnect_error:
-                    log.error(f"Reconnection failed: {reconnect_error}")
-                    if attempt == MAX_RETRIES - 1:
-                        raise
-
-        else:
-            log.error(f"Skipping {remote_file} after {MAX_RETRIES} failed attempts")
-
-    complete = success_count == FORECAST_HOURS
-    status = "complete" if complete else f"{success_count}/{FORECAST_HOURS}"
-    log.info(f"Cycle {cycle_id}: {status}")
-
+    count = len(state[cycle_id])
+    complete = count == FORECAST_HOURS
+    log.info(f"Cycle {cycle_id}: {'complete' if complete else f'{count}/{FORECAST_HOURS}'}")
     return complete
 
 # =============================================================================
@@ -359,38 +304,28 @@ def main():
     cycles_completed = 0
 
     try:
-        with sftp_connection() as sftp:
-            # We need a mutable holder so process_cycle can reconnect
-            transport = sftp.get_channel().get_transport()
-            sftp_holder = {'sftp': sftp, 'transport': transport}
+        current_date = datetime.utcnow()
 
-            current_date = datetime.utcnow()
+        for days_back in range(DAYS_TO_CHECK):
+            date = current_date - timedelta(days=days_back)
 
-            for days_back in range(DAYS_TO_CHECK):
-                date = current_date - timedelta(days=days_back)
-                date_str = date.strftime('%Y%m%d')
+            for hour in CYCLES:
+                cycle_id = f"{date.strftime('%Y%m%d')}{hour}"
 
-                for hour in CYCLES:
-                    cycle_id = f"{date_str}{hour}"
+                # Skip if already complete
+                if len(state.get(cycle_id, [])) == FORECAST_HOURS:
+                    log.debug(f"Skipping {cycle_id} (already complete)")
+                    continue
 
-                    # Skip if already complete
-                    if cycle_id in state and len(state[cycle_id]) == FORECAST_HOURS:
-                        log.debug(f"Skipping {cycle_id} (already complete)")
-                        continue
+                try:
+                    if process_cycle(date, hour, state):
+                        cycles_completed += 1
+                    cycles_processed += 1
 
-                    try:
-                        if process_cycle(sftp_holder, date_str, hour, state):
-                            cycles_completed += 1
-                        cycles_processed += 1
-
-                    except Exception as e:
-                        log.error(f"Failed to process cycle {cycle_id}: {e}")
-                        # Continue to next cycle instead of failing entirely
-                        continue
-
-    except paramiko.AuthenticationException:
-        log.error("Authentication failed. Check NSSL_USER and NSSL_PASS.")
-        sys.exit(1)
+                except Exception as e:
+                    log.error(f"Failed to process cycle {cycle_id}: {e}")
+                    # Continue to next cycle instead of failing entirely
+                    continue
 
     except Exception as e:
         log.exception(f"Fatal error: {e}")
