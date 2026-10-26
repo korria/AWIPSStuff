@@ -14,6 +14,8 @@ HISTORY:
   - 2026-10-26 - Switch from SFTP to the NSSL THREDDS archive (one .tar per
                  cycle over HTTPS); stream the tar and gunzip grib2 members
                  on the fly. Drops the paramiko dependency.
+  - 2026-10-26 - Resume dropped downloads with HTTP Range at the byte they
+                 stopped instead of restarting the 8 GB tar.
 """
 import os
 import re
@@ -26,6 +28,7 @@ import socket
 import logging
 import tarfile
 import subprocess
+import http.client
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta
@@ -58,7 +61,7 @@ FORECAST_HOURS = 84          # f01 through f84
 DAYS_TO_CHECK = 2            # Check today and yesterday
 CYCLES = ['00', '12']
 MAX_RETRIES = 3
-RETRY_DELAY = 60             # seconds
+RETRY_DELAY = 10             # seconds; NSSL cuts each transfer at ~1 GB
 STATE_RETENTION_DAYS = 7     # Prune state older than this
 
 # Forecast hour from a tar member name, e.g.
@@ -199,32 +202,68 @@ def process_member(tar, member, local_file):
                     pass
 
 
-def open_cycle_tar(date, hour):
+class TarDownload:
     """
-    Open the cycle's tar over HTTPS. Returns the response, or None if the
-    cycle isn't on the server yet.
+    Read-only file object over HTTPS for tarfile's stream mode. When the
+    connection drops mid-transfer it reconnects with a Range request at the
+    byte where it stopped, so tarfile never sees the break.
     """
-    url = TAR_URL.format(year=date.strftime('%Y'),
-                         yymmddhh=date.strftime('%y%m%d') + hour,
-                         run=RUN_NAME)
-    req = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
-    try:
-        return urllib.request.urlopen(req)
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return None
-        raise
+
+    def __init__(self, url):
+        self.url = url
+        self.pos = 0
+        self.resp = self._open()  # HTTPError 404 -> cycle not posted yet
+        self.size = int(self.resp.headers['Content-Length'])
+
+    def _open(self):
+        headers = {'User-Agent': USER_AGENT}
+        if self.pos:
+            headers['Range'] = f'bytes={self.pos}-'
+        resp = urllib.request.urlopen(
+            urllib.request.Request(self.url, headers=headers))
+        if self.pos:
+            # e.g. "bytes 123-7971604479/7971604480"
+            content_range = resp.headers.get('Content-Range', '')
+            if resp.status != 206 or not content_range.endswith(f'/{self.size}'):
+                resp.close()
+                raise IOError(f"Cannot resume {self.url}: HTTP {resp.status} "
+                              f"Content-Range '{content_range}'")
+        return resp
+
+    def read(self, n=-1):
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                data = self.resp.read(n)
+                err = 'connection closed early'
+            except (http.client.HTTPException, OSError) as e:
+                data, err = b'', e
+            if data or self.pos >= self.size:
+                self.pos += len(data)
+                return data
+
+            log.warning(f"Download dropped at {self.pos / 1e9:.2f} of "
+                        f"{self.size / 1e9:.2f} GB ({err}); resuming "
+                        f"(attempt {attempt}/{MAX_RETRIES})")
+            self.resp.close()
+            time.sleep(RETRY_DELAY)
+            try:
+                self.resp = self._open()
+            except (urllib.error.URLError, OSError) as e:
+                log.warning(f"Reconnect failed: {e}")
+        raise IOError(f"Download of {self.url} failed at byte {self.pos} "
+                      f"after {MAX_RETRIES} attempts")
+
+    def close(self):
+        self.resp.close()
 
 
-def stream_cycle(resp, cycle_id, local_prefix, state):
+def stream_cycle(src, cycle_id, local_prefix, state):
     """
     Walk the tar stream once, processing every wanted forecast hour not
     already in state. Returns the number of newly processed hours.
     """
-    # ponytail: a retry re-streams the whole tar (~8 GB) and skips done
-    # members; resume via HTTP Range at member offsets if bandwidth matters.
     done = 0
-    with tarfile.open(fileobj=resp, mode='r|') as tar:
+    with tarfile.open(fileobj=src, mode='r|') as tar:
         for member in tar:
             match = FHR_RE.search(member.name) if member.isfile() else None
             if not match:
@@ -255,24 +294,22 @@ def process_cycle(date, hour, state):
 
     state.setdefault(cycle_id, [])
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            resp = open_cycle_tar(date, hour)
-            if resp is None:
-                log.debug(f"Cycle {cycle_id} not available yet")
-                return False
+    url = TAR_URL.format(year=date.strftime('%Y'),
+                         yymmddhh=date.strftime('%y%m%d') + hour,
+                         run=RUN_NAME)
+    try:
+        src = TarDownload(url)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            log.debug(f"Cycle {cycle_id} not available yet")
+            return False
+        raise
 
-            log.info(f"Processing cycle {cycle_id} from {resp.url}")
-            with resp:
-                stream_cycle(resp, cycle_id, local_prefix, state)
-            break
-
-        except (urllib.error.URLError, tarfile.TarError,
-                socket.error, IOError) as e:
-            log.warning(f"Attempt {attempt}/{MAX_RETRIES} for {cycle_id} failed: {e}")
-            if attempt == MAX_RETRIES:
-                raise
-            time.sleep(RETRY_DELAY)
+    log.info(f"Processing cycle {cycle_id} from {url} ({src.size / 1e9:.1f} GB)")
+    try:
+        stream_cycle(src, cycle_id, local_prefix, state)
+    finally:
+        src.close()
 
     count = len(state[cycle_id])
     complete = count == FORECAST_HOURS
