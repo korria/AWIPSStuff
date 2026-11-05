@@ -7,21 +7,28 @@
 # then regrids to a CONUS + NE Pacific 0.1 deg lat-lon box, south-to-north.
 #
 # v2026.11.05 - Korri Anderson - Initial version
+# v2026.11.05 - Pull from the Google Cloud mirror (AWS S3 bucket was returning
+#               SlowDown), fall back to data.ecmwf.int; back off when throttled;
+#               fewer, larger range requests. No longer needs boto3.
 #
 import os
-import sys
-sys.path.insert(0, "/ldad/localapps/getRRFS/bin/")
 import json
+import time
+import random
 import shutil
 import logging
 import datetime
 import subprocess
-import boto3
-from botocore import UNSIGNED
-from botocore.config import Config
+import urllib.error
+import urllib.request
 
 # --- CONFIGURATION ---
-BUCKET_NAME = 'ecmwf-forecasts'
+# ECMWF open-data mirrors, tried in order. The AWS bucket (ecmwf-forecasts)
+# throttles heavily with SlowDown, so it is not used.
+MIRRORS = [
+    'https://storage.googleapis.com/ecmwf-open-data',
+    'https://data.ecmwf.int/forecasts',
+]
 STAGING_DIR = '/ldad/localapps/getECIFS/data'
 FINAL_DIR = '/data/Incoming'
 WGRIB2_BIN = '/ldad/localapps/getHRDPS/wgrib2'
@@ -31,7 +38,7 @@ CYCLES = ['12', '00']
 # Open data steps: 3-hourly to 144 h, then 6-hourly. Capped at 240 h like AIFS.
 F_HOURS = list(range(0, 145, 3)) + list(range(150, 241, 6))
 
-# Example key: 20261105/00z/ifs/0p1/oper/20261105000000-24h-oper-fc-sfc.grib2
+# Example path: 20261105/00z/ifs/0p1/oper/20261105000000-24h-oper-fc-sfc.grib2
 SRC_KEY_TEMPLATE = "{date}/{cycle}z/ifs/0p1/oper/{date}{cycle}0000-{fhour}h-oper-fc-{kind}"
 DEST_FILENAME_TEMPLATE = "LDAD-GRIB-ECMWF-IFS_{}_t{}z_f{:03d}.grib2"
 
@@ -64,20 +71,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 
-def get_s3_client():
-    return boto3.client('s3', config=Config(
-        signature_version=UNSIGNED,
-        connect_timeout=10,
-        read_timeout=120,
-        retries={'max_attempts': 8, 'mode': 'adaptive'}
-    ))
-
-
 def src_key(date_str, cycle, f_hour, kind):
     return SRC_KEY_TEMPLATE.format(date=date_str, cycle=cycle, fhour=f_hour, kind=kind)
 
 
-def find_latest_complete_run(client):
+def find_latest_complete_run():
     """Newest run whose last wanted hour is posted (both sfc and pl)."""
     now = datetime.datetime.now(datetime.timezone.utc)
     for i in range(MAX_LOOKBACK_DAYS):
@@ -85,8 +83,7 @@ def find_latest_complete_run(client):
         for cycle in CYCLES:
             try:
                 for kind in ('sfc.index', 'pl.index'):
-                    client.head_object(Bucket=BUCKET_NAME,
-                                       Key=src_key(date_str, cycle, F_HOURS[-1], kind))
+                    fetch(src_key(date_str, cycle, F_HOURS[-1], kind))
                 return date_str, cycle
             except Exception:
                 log.info(f"{date_str} {cycle}z not complete yet")
@@ -117,16 +114,66 @@ def wanted_ranges(index_text, params, pressure_levels):
     return sorted(ranges)
 
 
-def download_fields(client, date_str, cycle, f_hour, out_path):
+def group_ranges(ranges, max_gap=5 * 1024 * 1024):
+    """
+    Group wanted ranges into fewer requests: ranges less than max_gap
+    apart share one request. Returns [(span_start, span_end, [ranges])].
+    """
+    groups = []
+    for start, end in ranges:
+        if groups and start - groups[-1][1] - 1 <= max_gap:
+            groups[-1] = (groups[-1][0], end, groups[-1][2] + [(start, end)])
+        else:
+            groups.append((start, end, [(start, end)]))
+    return groups
+
+
+def fetch(path, byte_range=None, max_retries=6):
+    """
+    GET a file (or inclusive byte range) from the open-data mirrors. A mirror
+    that throttles, errors, or doesn't have the file yet passes to the next;
+    after a full pass with no luck, back off and try again.
+    """
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    if byte_range:
+        headers['Range'] = 'bytes=%d-%d' % byte_range
+    name = os.path.basename(path)
+    for attempt in range(max_retries):
+        codes = []
+        for base in MIRRORS:
+            try:
+                req = urllib.request.Request(f'{base}/{path}', headers=headers)
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    data = resp.read()
+                if byte_range and len(data) != byte_range[1] - byte_range[0] + 1:
+                    raise IOError(f'got {len(data)} bytes for range {byte_range}')
+                return data
+            except urllib.error.HTTPError as e:
+                codes.append(e.code)
+                if e.code != 404:
+                    log.warning(f"HTTP {e.code} from {base} for {name}")
+            except (urllib.error.URLError, OSError) as e:
+                codes.append(None)
+                log.warning(f"{base} failed for {name}: {e}")
+        if all(code == 404 for code in codes):
+            raise IOError(f"{name} not posted yet")
+        wait = min(5 * 2 ** attempt, 120) + random.uniform(0, 1)
+        log.warning(f"All mirrors failed for {name}; waiting {wait:.0f}s "
+                    f"(attempt {attempt + 1}/{max_retries})")
+        time.sleep(wait)
+    raise IOError(f"Could not download {name} after {max_retries} attempts")
+
+
+def download_fields(date_str, cycle, f_hour, out_path):
     """Write the wanted GRIB messages from the sfc and pl files to out_path."""
     with open(out_path, 'wb') as out:
         for kind, params, is_pl in (('sfc', SFC_PARAMS, False), ('pl', PL_PARAMS, True)):
             base = src_key(date_str, cycle, f_hour, kind)
-            index = client.get_object(Bucket=BUCKET_NAME, Key=base + '.index')['Body'].read()
-            for start, end in wanted_ranges(index.decode(), params, is_pl):
-                body = client.get_object(Bucket=BUCKET_NAME, Key=base + '.grib2',
-                                         Range=f'bytes={start}-{end}')['Body']
-                shutil.copyfileobj(body, out, 1024 * 1024)
+            index = fetch(base + '.index').decode()
+            for span_start, span_end, pieces in group_ranges(wanted_ranges(index, params, is_pl)):
+                data = fetch(base + '.grib2', (span_start, span_end))
+                for start, end in pieces:
+                    out.write(data[start - span_start:end - span_start + 1])
 
 
 def sanitize_grib(input_path, output_path):
@@ -176,7 +223,7 @@ def sanitize_grib(input_path, output_path):
             os.remove(temp_path)
 
 
-def process_run(client, date_str, cycle):
+def process_run(date_str, cycle):
     log.info(f">>> PROCESSING: {date_str} {cycle}z <<<")
     os.makedirs(STAGING_DIR, exist_ok=True)
     os.makedirs(FINAL_DIR, exist_ok=True)
@@ -193,7 +240,7 @@ def process_run(client, date_str, cycle):
             continue
 
         try:
-            download_fields(client, date_str, cycle, f_hour, raw_path)
+            download_fields(date_str, cycle, f_hour, raw_path)
             if not sanitize_grib(raw_path, clean_path):
                 log.error(f"Conversion failed for f{f_hour:03d}")
                 return False
@@ -213,9 +260,7 @@ def process_run(client, date_str, cycle):
 
 
 def main():
-    client = get_s3_client()
-
-    date_str, cycle = find_latest_complete_run(client)
+    date_str, cycle = find_latest_complete_run()
     if not date_str:
         log.error(f"No complete runs found in the last {MAX_LOOKBACK_DAYS} days.")
         return
@@ -224,7 +269,7 @@ def main():
         log.info(f"Run {date_str} {cycle}z already finished. Exiting.")
         return
 
-    if process_run(client, date_str, cycle):
+    if process_run(date_str, cycle):
         with open(marker_path(date_str, cycle), 'w') as f:
             f.write(f"Download complete at {datetime.datetime.now(datetime.timezone.utc)}")
         log.info(f"Run marked complete: {marker_path(date_str, cycle)}")
