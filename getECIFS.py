@@ -11,6 +11,8 @@
 #               SlowDown), then S3, then data.ecmwf.int; back off when throttled;
 #               fewer, larger range requests. No longer needs boto3.
 # v2026.11.05 - 6-hourly 0-240 h (was 3-hourly to 144 h).
+# v2026.11.05 - Leave tp as ECMWF 0-1-193 (m) so AWIPS maps it to TP-ECMWF;
+#               no longer renamed to APCP.
 #
 import os
 import json
@@ -184,8 +186,9 @@ def sanitize_grib(input_path, output_path):
     Step 1: regrid to the output box (also flips ECMWF north-to-south order
             to south-to-north). Nearest neighbour: the box sits on the source
             0.1 deg points, so values are copied, and ptype stays categorical.
-    Step 2: tp (metres) -> APCP (kg m-2 = mm), as AWIPS expects, and
-            CRAIN/CSNOW/CFRZR/CICEP derived from PTYPE.
+    Step 2: append CRAIN/CSNOW/CFRZR/CICEP derived from PTYPE. tp, cp and
+            sf pass through unchanged (ECMWF codes, metres, run-total), so
+            AWIPS maps tp to TP-ECMWF via its tpecmwf entry.
     """
     temp_path = input_path + ".box"
     cmd_step1 = [
@@ -201,10 +204,6 @@ def sanitize_grib(input_path, output_path):
     ]
     cmd_step2 = [
         WGRIB2_BIN, temp_path,
-        '-if', ':(tprate|TPRATE|TP|var0_1_228):',
-            '-rpn', '1000:*',
-            '-set_var', 'APCP',
-        '-endif',
         '-set_grib_type', 'c3',
         '-grib_out', output_path,
     ]
