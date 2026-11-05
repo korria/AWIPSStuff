@@ -3,22 +3,27 @@
 # Get ECMWF-AIFS and put into LDAD-GRIB
 #
 # v2025.12.09 - Korri Anderson
+# v2026.11.05 - Download over HTTPS from the ECMWF Google Cloud mirror, falling
+#               back to the AWS bucket (throttles with SlowDown) and data.ecmwf.int.
+#               No longer needs boto3.
 #
 import os
 import shutil
-import sys
-sys.path.insert(0, "/ldad/localapps/getRRFS/bin/")
-import boto3
 import datetime
 import time
 import random
 import subprocess
-from botocore import UNSIGNED
-from botocore.config import Config
-from botocore.exceptions import ClientError
+import urllib.error
+import urllib.request
 
 # --- CONFIGURATION ---
-BUCKET_NAME = 'ecmwf-forecasts'
+# ECMWF open-data mirrors, tried in order. The AWS bucket throttles heavily
+# (SlowDown), so it is a backup; ECMWF's own server is last, as ECMWF asks.
+MIRRORS = [
+    'https://storage.googleapis.com/ecmwf-open-data',
+    'https://ecmwf-forecasts.s3.amazonaws.com',
+    'https://data.ecmwf.int/forecasts',
+]
 STAGING_DIR = '/ldad/localapps/getECMWF/data'
 FINAL_DIR = '/data/Incoming'
 WGRIB2_BIN = '/ldad/localapps/getHRDPS/wgrib2'
@@ -34,26 +39,47 @@ STEP_HOURS = 6
 SRC_FILENAME_TEMPLATE = "{date}{cycle}0000-{fhour}h-oper-fc.grib2"
 DEST_FILENAME_TEMPLATE = "LDAD-GRIB-ECMWF-AIFS_{}_t{}z_f{:03d}.grib2"
 
-def get_s3_client():
-    # Includes timeouts to ensure script fails fast rather than hanging
-    return boto3.client('s3', config=Config(
-        signature_version=UNSIGNED,
-        connect_timeout=10,
-        read_timeout=120,
-        retries={'max_attempts': 8, 'mode':'adaptive'}
-    ))
+def fetch(path, max_retries=6):
+    """
+    GET a file from the open-data mirrors, in order.
+    A mirror that throttles or errors passes to the next. A 404 means the
+    file isn't posted yet. If every mirror fails, back off and try again.
+    """
+    name = os.path.basename(path)
+    for attempt in range(max_retries):
+        codes = []
+        for base in MIRRORS:
+            try:
+                req = urllib.request.Request(f'{base}/{path}',
+                                             headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    return resp.read()
+            except urllib.error.HTTPError as e:
+                codes.append(e.code)
+                if e.code != 404:
+                    print(f"\n [WARN] HTTP {e.code} from {base} for {name}")
+            except (urllib.error.URLError, OSError) as e:
+                codes.append(None)
+                print(f"\n [WARN] {base} failed for {name}: {e}")
+        if 404 in codes:  # a mirror says not posted; next cron run retries
+            raise IOError(f"{name} not posted yet")
+        wait = min(5 * 2 ** attempt, 120) + random.uniform(0, 1)
+        print(f" [SLOWDOWN] All mirrors failed for {name}. Waiting {wait:.0f}s "
+              f"(attempt {attempt + 1}/{max_retries})")
+        time.sleep(wait)
+    raise IOError(f"Could not download {name} after {max_retries} attempts")
 
-def check_s3_file_exists(client, bucket, key):
+def file_exists(path):
     try:
-        print(f"  [CHECKING] {key}...", end='', flush=True)
-        client.head_object(Bucket=bucket, Key=key)
+        print(f"  [CHECKING] {path}...", end='', flush=True)
+        fetch(path.replace('.grib2', '.index'))  # small file, same posting
         print(" FOUND!")
         return True
     except Exception:
         print(" Not found.")
         return False
 
-def find_latest_complete_run(client):
+def find_latest_complete_run():
     """
     Calculates dates for the last few days and checks specific paths directly.
     """
@@ -75,10 +101,10 @@ def find_latest_complete_run(client):
                 fhour=MAX_F_HOUR
             )
 
-            # Key: 20251207/00z/aifs-single/0p25/oper/FILENAME
+            # Path: 20251207/00z/aifs-single/0p25/oper/FILENAME
             key = f"{date_str}/{cycle}z/aifs-single/0p25/oper/{filename}"
 
-            if check_s3_file_exists(client, BUCKET_NAME, key):
+            if file_exists(key):
                 return date_str, cycle
 
     return None, None
@@ -94,20 +120,10 @@ def mark_run_complete(date_str, cycle):
         f.write(f"Download complete at {datetime.datetime.now(datetime.timezone.utc)}")
     print(f"[INFO] Run marked complete: {marker}")
 
-def download_backoff(client, bucket, key, dest_path, max_retries=10):
-    for attempt in range(max_retries):
-        try:
-            client.download_file(bucket, key, dest_path)
-            return True
-        except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == 'SlowDown':
-                wait = (2 ** attempt) + random.uniform(0,1)
-                print(f"\n [SLOWDOWN] Throttled. Waiting {wait:.1f}s (attempt {attempt+1}/{max_retries})")
-                time.sleep(wait)
-            else:
-                raise
-    raise Exception(f"Max retries exceeded for {key}")
+def download(path, dest_path):
+    data = fetch(path)
+    with open(dest_path, 'wb') as f:
+        f.write(data)
 
 def sanitize_grib(input_path, output_path):
     """
@@ -209,7 +225,7 @@ def sanitize_grib(input_path, output_path):
         print(f"   [ERROR] wgrib2 binary not found at: {WGRIB2_BIN}")
         return False
 
-def process_run(client, date_str, cycle):
+def process_run(date_str, cycle):
     print(f"\n>>> PROCESSING: {date_str} {cycle}z <<<")
 
     if not os.path.exists(STAGING_DIR): os.makedirs(STAGING_DIR)
@@ -224,7 +240,7 @@ def process_run(client, date_str, cycle):
             fhour=f_hour
         )
 
-        s3_key = f"{date_str}/{cycle}z/aifs-single/0p25/oper/{src_filename}"
+        src_path = f"{date_str}/{cycle}z/aifs-single/0p25/oper/{src_filename}"
 
         # Staging paths
         staging_raw_path = os.path.join(STAGING_DIR, f"raw_{src_filename}")
@@ -244,7 +260,7 @@ def process_run(client, date_str, cycle):
         print(f"   Downloading {src_filename}...", end="\r")
         try:
             # Download Raw
-            download_backoff(client, BUCKET_NAME, s3_key, staging_raw_path)
+            download(src_path, staging_raw_path)
             time.sleep(1.5)
             # Sanitize (Reproject + Compress + Clip)
             if sanitize_grib(staging_raw_path, staging_clean_path):
@@ -267,10 +283,8 @@ def process_run(client, date_str, cycle):
     return True
 
 def main():
-    client = get_s3_client()
-
     # 1. Find Run using calculated dates
-    date_str, cycle = find_latest_complete_run(client)
+    date_str, cycle = find_latest_complete_run()
 
     if not date_str:
         print("[ERROR] No complete runs found in the last 3 days.")
@@ -284,7 +298,7 @@ def main():
         return
 
     # 3. Process
-    if process_run(client, date_str, cycle):
+    if process_run(date_str, cycle):
         mark_run_complete(date_str, cycle)
 
 if __name__ == "__main__":

@@ -7,9 +7,10 @@
 # then regrids to a CONUS + NE Pacific 0.1 deg lat-lon box, south-to-north.
 #
 # v2026.11.05 - Korri Anderson - Initial version
-# v2026.11.05 - Pull from the Google Cloud mirror (AWS S3 bucket was returning
-#               SlowDown), fall back to data.ecmwf.int; back off when throttled;
+# v2026.11.05 - Pull from the Google Cloud mirror first (AWS S3 bucket was returning
+#               SlowDown), then S3, then data.ecmwf.int; back off when throttled;
 #               fewer, larger range requests. No longer needs boto3.
+# v2026.11.05 - 6-hourly 0-240 h (was 3-hourly to 144 h).
 #
 import os
 import json
@@ -23,10 +24,11 @@ import urllib.error
 import urllib.request
 
 # --- CONFIGURATION ---
-# ECMWF open-data mirrors, tried in order. The AWS bucket (ecmwf-forecasts)
-# throttles heavily with SlowDown, so it is not used.
+# ECMWF open-data mirrors, tried in order. The AWS bucket throttles heavily
+# (SlowDown), so it is a backup; ECMWF's own server is last, as ECMWF asks.
 MIRRORS = [
     'https://storage.googleapis.com/ecmwf-open-data',
+    'https://ecmwf-forecasts.s3.amazonaws.com',
     'https://data.ecmwf.int/forecasts',
 ]
 STAGING_DIR = '/ldad/localapps/getECIFS/data'
@@ -35,19 +37,20 @@ WGRIB2_BIN = '/ldad/localapps/getHRDPS/wgrib2'
 
 MAX_LOOKBACK_DAYS = 3
 CYCLES = ['12', '00']
-# Open data steps: 3-hourly to 144 h, then 6-hourly. Capped at 240 h like AIFS.
-F_HOURS = list(range(0, 145, 3)) + list(range(150, 241, 6))
+# 6-hourly to 240 h, like AIFS (open data also has 3-hourly to 144 h).
+F_HOURS = list(range(0, 241, 6))
 
 # Example path: 20261105/00z/ifs/0p1/oper/20261105000000-24h-oper-fc-sfc.grib2
 SRC_KEY_TEMPLATE = "{date}/{cycle}z/ifs/0p1/oper/{date}{cycle}0000-{fhour}h-oper-fc-{kind}"
 DEST_FILENAME_TEMPLATE = "LDAD-GRIB-ECMWF-IFS_{}_t{}z_f{:03d}.grib2"
 
 # Fields to keep. Surface/soil: the AIFS set plus IFS-only extras
-# (10fg gust, mucape, ptype, 3 h max/min temp). Pressure levels: all levels.
+# (10fg gust, mucape, ptype, 3 h and 6 h max/min temp; names a given hour
+# doesn't have are simply skipped). Pressure levels: all levels.
 SFC_PARAMS = {
     '100u', '100v', '10u', '10v', '2d', '2t', 'cp', 'hcc', 'lcc', 'mcc',
     'msl', 'sf', 'skt', 'sot', 'sp', 'ssrd', 'strd', 'tcc', 'tcw', 'tp',
-    'vsw', '10fg', 'mucape', 'ptype', 'mx2t3', 'mn2t3',
+    'vsw', '10fg', 'mucape', 'ptype', 'mx2t3', 'mn2t3', 'mx2t6', 'mn2t6',
 }
 PL_PARAMS = {'gh', 'q', 't', 'u', 'v', 'w'}
 
@@ -130,9 +133,9 @@ def group_ranges(ranges, max_gap=5 * 1024 * 1024):
 
 def fetch(path, byte_range=None, max_retries=6):
     """
-    GET a file (or inclusive byte range) from the open-data mirrors. A mirror
-    that throttles, errors, or doesn't have the file yet passes to the next;
-    after a full pass with no luck, back off and try again.
+    GET a file (or inclusive byte range) from the open-data mirrors, in order.
+    A mirror that throttles or errors passes to the next. A 404 means the
+    file isn't posted yet. If every mirror fails, back off and try again.
     """
     headers = {'User-Agent': 'Mozilla/5.0'}
     if byte_range:
@@ -155,7 +158,7 @@ def fetch(path, byte_range=None, max_retries=6):
             except (urllib.error.URLError, OSError) as e:
                 codes.append(None)
                 log.warning(f"{base} failed for {name}: {e}")
-        if all(code == 404 for code in codes):
+        if 404 in codes:  # a mirror says not posted; next cron run retries
             raise IOError(f"{name} not posted yet")
         wait = min(5 * 2 ** attempt, 120) + random.uniform(0, 1)
         log.warning(f"All mirrors failed for {name}; waiting {wait:.0f}s "
