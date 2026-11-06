@@ -16,6 +16,7 @@
 # v2026.11.06 - Gust labelled instantaneous so AWIPS shows WGS at every hour;
 #               f000 gust (all zeros) dropped.
 # v2026.11.06 - msl relabelled PRMSL so AWIPS stores it as PMSL, not msl-P.
+# v2026.11.06 - Cloud cover tcc/lcc/mcc/hcc -> TCDC/LCDC/MCDC/HCDC (%), as AIFS.
 # v2026.11.06 - Add surface z (f000 only) as HGT (m) terrain, same as getECAI.
 #
 import os
@@ -218,6 +219,15 @@ def sanitize_grib(input_path, output_path, f_hour):
             '-rpn', '9.80665:/',
             '-set_var', 'HGT',
         '-endif',
+        # IFS cloud cover uses ECMWF local codes (0-6-192..195) as 0-1
+        # fractions; write WMO TCDC/LCDC/MCDC/HCDC in %, same layers as AIFS.
+        '-if', ':tcc:', '-rpn', '100:*', '-set_var', 'TCDC', '-endif',
+        '-if', ':lcc:', '-rpn', '100:*', '-set_var', 'LCDC',
+            '-set_lev', 'surface - 800 mb', '-endif',
+        '-if', ':mcc:', '-rpn', '100:*', '-set_var', 'MCDC',
+            '-set_lev', '800-450 mb', '-endif',
+        '-if', ':hcc:', '-rpn', '100:*', '-set_var', 'HCDC',
+            '-set_lev', '450 mb - top of atmosphere', '-endif',
         # ECMWF codes msl as plain pressure (0-3-0) at MSL, which AWIPS stores
         # as msl-P; PRMSL (0-3-1) is what AWIPS stores as PMSL, as for GFS.
         '-if', ':PRES:mean sea level:',
