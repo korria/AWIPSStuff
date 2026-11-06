@@ -4,7 +4,7 @@
 #
 # Modeled on getECAI.py (ECMWF-AIFS). Pulls only the wanted fields out of the
 # global 0.1 deg files using the .index byte offsets (~470 MB/hour otherwise),
-# then regrids to a CONUS + NE Pacific 0.1 deg lat-lon box, south-to-north.
+# then regrids to a North America + NE Pacific 0.1 deg lat-lon box, south-to-north.
 #
 # v2026.11.05 - Korri Anderson - Initial version
 # v2026.11.05 - Pull from the Google Cloud mirror first (AWS S3 bucket was returning
@@ -18,6 +18,7 @@
 # v2026.11.06 - msl relabelled PRMSL so AWIPS stores it as PMSL, not msl-P.
 # v2026.11.06 - Cloud cover tcc/lcc/mcc/hcc -> TCDC/LCDC/MCDC/HCDC (%), as AIFS.
 # v2026.11.06 - cp -> CPRAT and sf -> TSRWE in mm, as AIFS.
+# v2026.11.06 - Domain 180-40W, 15-70N (1401 x 551), was 160-60W, 20-60N.
 # v2026.11.06 - Add surface z (f000 only) as HGT (m) terrain, same as getECAI.
 #
 import os
@@ -73,9 +74,9 @@ PTYPE_TO_CATEGORICAL = [
 ]
 
 # Output grid (wgrib2 -new_grid latlon lon0:nlon:dlon lat0:nlat:dlat)
-# 160W-60W, 20N-60N at 0.1 deg = 1001 x 401. AWIPS needs a matching grid.
-OUT_LON = '200:1001:0.1'
-OUT_LAT = '20:401:0.1'
+# 180-40W, 15N-70N at 0.1 deg = 1401 x 551.
+OUT_LON = '180:1401:0.1'
+OUT_LAT = '15:551:0.1'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S')
