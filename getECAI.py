@@ -7,6 +7,7 @@
 #               back to the AWS bucket (throttles with SlowDown) and data.ecmwf.int.
 #               No longer needs boto3.
 # v2026.11.06 - Drop -set_scaling on HGT; default packing is more accurate.
+# v2026.11.06 - -new_grid_vectors none: 14 upper-air U/V records were dropped.
 #
 import os
 import shutil
@@ -144,6 +145,9 @@ def sanitize_grib(input_path, output_path):
         # --- REGRIDDING ---
         '-set_grib_type', 'c3',      # Complex Packing (Efficient)
         '-new_grid_winds', 'earth',  # Rotate winds
+        # Winds are already earth-relative, and ECMWF does not keep U and V
+        # adjacent, so wgrib2 would drop the unpaired ones.
+        '-new_grid_vectors', 'none',
         '-new_grid', 'latlon',
         '0:1440:0.25',               # Lon: 0 to 359.75
         '0:361:0.25',                # Lat: 0 to 90 (North)
