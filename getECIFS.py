@@ -13,6 +13,8 @@
 # v2026.11.05 - 6-hourly 0-240 h (was 3-hourly to 144 h).
 # v2026.11.05 - tp -> APCP (x1000, m -> mm), same as getECAI. AWIPS did not
 #               decode the raw ECMWF local code 0-1-193.
+# v2026.11.06 - Gust labelled instantaneous so AWIPS shows WGS at every hour;
+#               f000 gust (all zeros) dropped.
 # v2026.11.06 - Add surface z (f000 only) as HGT (m) terrain, same as getECAI.
 #
 import os
@@ -182,7 +184,7 @@ def download_fields(date_str, cycle, f_hour, out_path):
                     out.write(data[start - span_start:end - span_start + 1])
 
 
-def sanitize_grib(input_path, output_path):
+def sanitize_grib(input_path, output_path, f_hour):
     """
     Step 1: regrid to the output box (also flips ECMWF north-to-south order
             to south-to-north). Nearest neighbour: the box sits on the source
@@ -205,6 +207,7 @@ def sanitize_grib(input_path, output_path):
     ]
     cmd_step2 = [
         WGRIB2_BIN, temp_path,
+    ] + (['-not', ':GUST:'] if f_hour == 0 else []) + [  # f000 gust is all zeros
         # wgrib2 names 0-1-193 tprate (newer) or var0_1_193 (older builds).
         '-if', ':(tprate|var0_1_193|var0_1_1_98_1_193):',
             '-rpn', '1000:*',
@@ -213,6 +216,11 @@ def sanitize_grib(input_path, output_path):
         '-if', ':GP:',
             '-rpn', '9.80665:/',
             '-set_var', 'HGT',
+        '-endif',
+        # 10fg is a max over the last hour; AWIPS files that as a separate
+        # 1-hour parameter, so label it instantaneous to get WGS every hour.
+        '-if', ':GUST:',
+            '-set_ftime', f'{f_hour} hour fcst',
         '-endif',
         '-set_grib_type', 'c3',
         '-grib_out', output_path,
@@ -253,7 +261,7 @@ def process_run(date_str, cycle):
 
         try:
             download_fields(date_str, cycle, f_hour, raw_path)
-            if not sanitize_grib(raw_path, clean_path):
+            if not sanitize_grib(raw_path, clean_path, f_hour):
                 log.error(f"Conversion failed for f{f_hour:03d}")
                 return False
             shutil.move(clean_path, temp_move_path)
