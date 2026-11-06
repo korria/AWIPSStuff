@@ -13,6 +13,7 @@
 # v2026.11.05 - 6-hourly 0-240 h (was 3-hourly to 144 h).
 # v2026.11.05 - tp -> APCP (x1000, m -> mm), same as getECAI. AWIPS did not
 #               decode the raw ECMWF local code 0-1-193.
+# v2026.11.06 - Add surface z (f000 only) as HGT (m) terrain, same as getECAI.
 #
 import os
 import json
@@ -52,7 +53,7 @@ DEST_FILENAME_TEMPLATE = "LDAD-GRIB-ECMWF-IFS_{}_t{}z_f{:03d}.grib2"
 SFC_PARAMS = {
     '100u', '100v', '10u', '10v', '2d', '2t', 'cp', 'hcc', 'lcc', 'mcc',
     'msl', 'sf', 'skt', 'sot', 'sp', 'ssrd', 'strd', 'tcc', 'tcw', 'tp',
-    'vsw', '10fg', 'mucape', 'ptype', 'mx2t3', 'mn2t3', 'mx2t6', 'mn2t6',
+    'vsw', 'z', '10fg', 'mucape', 'ptype', 'mx2t3', 'mn2t3', 'mx2t6', 'mn2t6',
 }
 PL_PARAMS = {'gh', 'q', 't', 'u', 'v', 'w'}
 
@@ -187,7 +188,8 @@ def sanitize_grib(input_path, output_path):
             to south-to-north). Nearest neighbour: the box sits on the source
             0.1 deg points, so values are copied, and ptype stays categorical.
     Step 2: tp (ECMWF local 0-1-193, metres) -> APCP (kg m-2 = mm), as in
-            getECAI, and append CRAIN/CSNOW/CFRZR/CICEP derived from PTYPE.
+            getECAI; surface geopotential z (f000 only) -> HGT terrain (m);
+            append CRAIN/CSNOW/CFRZR/CICEP derived from PTYPE.
     """
     temp_path = input_path + ".box"
     cmd_step1 = [
@@ -207,6 +209,10 @@ def sanitize_grib(input_path, output_path):
         '-if', ':(tprate|var0_1_193|var0_1_1_98_1_193):',
             '-rpn', '1000:*',
             '-set_var', 'APCP',
+        '-endif',
+        '-if', ':GP:',
+            '-rpn', '9.80665:/',
+            '-set_var', 'HGT',
         '-endif',
         '-set_grib_type', 'c3',
         '-grib_out', output_path,
