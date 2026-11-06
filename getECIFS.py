@@ -17,6 +17,7 @@
 #               f000 gust (all zeros) dropped.
 # v2026.11.06 - msl relabelled PRMSL so AWIPS stores it as PMSL, not msl-P.
 # v2026.11.06 - Cloud cover tcc/lcc/mcc/hcc -> TCDC/LCDC/MCDC/HCDC (%), as AIFS.
+# v2026.11.06 - cp -> CPRAT and sf -> TSRWE in mm, as AIFS.
 # v2026.11.06 - Add surface z (f000 only) as HGT (m) terrain, same as getECAI.
 #
 import os
@@ -219,6 +220,12 @@ def sanitize_grib(input_path, output_path, f_hour):
             '-rpn', '9.80665:/',
             '-set_var', 'HGT',
         '-endif',
+        # cp and sf are ECMWF local codes in metres; write mm with the WMO
+        # codes AIFS uses (CPRAT 0-1-37, TSRWE 0-1-53, run totals).
+        '-if', ':(cp|var0_1_195|var0_1_1_98_1_195):',
+            '-rpn', '1000:*', '-set_var', 'CPRAT', '-endif',
+        '-if', ':(sf|mtsfr|var0_1_198|var0_1_1_98_1_198):',
+            '-rpn', '1000:*', '-set_var', 'TSRWE', '-endif',
         # IFS cloud cover uses ECMWF local codes (0-6-192..195) as 0-1
         # fractions; write WMO TCDC/LCDC/MCDC/HCDC in %, same layers as AIFS.
         '-if', ':tcc:', '-rpn', '100:*', '-set_var', 'TCDC', '-endif',
