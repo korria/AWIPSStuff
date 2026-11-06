@@ -15,6 +15,7 @@
 #               decode the raw ECMWF local code 0-1-193.
 # v2026.11.06 - Gust labelled instantaneous so AWIPS shows WGS at every hour;
 #               f000 gust (all zeros) dropped.
+# v2026.11.06 - msl relabelled PRMSL so AWIPS stores it as PMSL, not msl-P.
 # v2026.11.06 - Add surface z (f000 only) as HGT (m) terrain, same as getECAI.
 #
 import os
@@ -216,6 +217,11 @@ def sanitize_grib(input_path, output_path, f_hour):
         '-if', ':GP:',
             '-rpn', '9.80665:/',
             '-set_var', 'HGT',
+        '-endif',
+        # ECMWF codes msl as plain pressure (0-3-0) at MSL, which AWIPS stores
+        # as msl-P; PRMSL (0-3-1) is what AWIPS stores as PMSL, as for GFS.
+        '-if', ':PRES:mean sea level:',
+            '-set_var', 'PRMSL',
         '-endif',
         # 10fg is a max over the last hour; AWIPS files that as a separate
         # 1-hour parameter, so label it instantaneous to get WGS every hour.
