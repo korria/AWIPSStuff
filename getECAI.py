@@ -6,6 +6,7 @@
 # v2026.11.05 - Download over HTTPS from the ECMWF Google Cloud mirror, falling
 #               back to the AWS bucket (throttles with SlowDown) and data.ecmwf.int.
 #               No longer needs boto3.
+# v2026.11.06 - Drop -set_scaling on HGT; default packing is more accurate.
 #
 import os
 import shutil
@@ -159,7 +160,8 @@ def sanitize_grib(input_path, output_path):
         '-if', ':(GP):',
             '-rpn','9.80665:/',
             '-set_var', 'HGT',
-            '-set_scaling','1','0',
+            # No -set_scaling: 1 0 packed to 8 bits (errors up to 5 m);
+            # wgrib2's default keeps heights within 0.5 m.
         '-endif',
 
         # --- FIX: Total Precipitation (tp) ---
