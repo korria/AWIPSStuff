@@ -8,6 +8,7 @@
 #               No longer needs boto3.
 # v2026.11.06 - Drop -set_scaling on HGT; default packing is more accurate.
 # v2026.11.06 - -new_grid_vectors none: 14 upper-air U/V records were dropped.
+# v2026.11.06 - msl relabelled PRMSL so AWIPS stores it as PMSL, not msl-P.
 #
 import os
 import shutil
@@ -198,9 +199,11 @@ def sanitize_grib(input_path, output_path):
         #'-endif',
 
         # --- FIX: Mean Sea Level Pressure (msl) ---
-        #'-if', ':MSL:',
-        #    '-set_var', 'PMSL',
-        #'-endif',
+        # ECMWF codes msl as plain pressure (0-3-0) at MSL, which AWIPS stores
+        # as msl-P; PRMSL (0-3-1) is what AWIPS stores as PMSL, as for GFS.
+        '-if', ':PRES:mean sea level:',
+            '-set_var', 'PRMSL',
+        '-endif',
 
         '-set_grib_type','c3',
         '-grib_out', output_path
