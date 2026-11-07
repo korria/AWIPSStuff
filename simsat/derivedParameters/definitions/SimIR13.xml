@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<DerivedParameter abbreviation="SimIR13" name="Sim GOES-West Band 13 Clean IR 10.3um" unit="K">
+    <Method name="Alias" levels="Surface">
+        <Field abbreviation="SBTA1813" level="NTAT"/>
+    </Method>
+</DerivedParameter>

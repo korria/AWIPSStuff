@@ -1,0 +1,5 @@
+    <contribute xsi:type="titleImgItem" titleText="------ Simulated Satellite (GOES-West) ------"/>
+    <contribute xsi:type="menuItem" menuText="Sim IR Band 13 (10.3um)" key="SimIR13" indentText="true"/>
+    <contribute xsi:type="menuItem" menuText="Sim WV Band 8 Upper (6.2um)" key="SimWV08" indentText="true"/>
+    <contribute xsi:type="menuItem" menuText="Sim WV Band 9 Mid (6.9um)" key="SimWV09" indentText="true"/>
+    <contribute xsi:type="menuItem" menuText="Sim WV Band 10 Low (7.3um)" key="SimWV10" indentText="true"/>

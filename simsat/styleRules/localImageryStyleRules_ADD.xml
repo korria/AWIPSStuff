@@ -1,0 +1,38 @@
+    <!-- Simulated GOES-West IR: same display as real IR imagery -->
+    <styleRule>
+        <paramLevelMatches>
+            <parameter>SimIR13</parameter>
+        </paramLevelMatches>
+        <imageStyle>
+            <displayUnits>C</displayUnits>
+            <range scale="LINEAR">
+                <minValue>55</minValue>
+                <maxValue>-109</maxValue>
+            </range>
+            <defaultColormap>Sat/IR/CIRA (IR Default)</defaultColormap>
+            <colorbarLabeling>
+                <values>40 20 0 -20 -40 -60 -80</values>
+            </colorbarLabeling>
+        </imageStyle>
+    </styleRule>
+    <!-- Simulated GOES-West water vapor. 145 to -110 C is 1 K per colormap step,
+         the legacy GOES count stretch the gray WV colormap was built for, so it
+         looks like real WV imagery (dark above about -20 C, white near -110 C). -->
+    <styleRule>
+        <paramLevelMatches>
+            <parameter>SimWV08</parameter>
+            <parameter>SimWV09</parameter>
+            <parameter>SimWV10</parameter>
+        </paramLevelMatches>
+        <imageStyle>
+            <displayUnits>C</displayUnits>
+            <range scale="LINEAR">
+                <minValue>145</minValue>
+                <maxValue>-110</maxValue>
+            </range>
+            <defaultColormap>Sat/WV/Gray Scale Water Vapor</defaultColormap>
+            <colorbarLabeling>
+                <values>-30 -40 -50 -60 -70 -80</values>
+            </colorbarLabeling>
+        </imageStyle>
+    </styleRule>

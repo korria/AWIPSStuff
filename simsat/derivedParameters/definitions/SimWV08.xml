@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<DerivedParameter abbreviation="SimWV08" name="Sim GOES-West Band 8 Upper WV 6.2um" unit="K">
+    <Method name="Alias" levels="Surface">
+        <Field abbreviation="SBTA188" level="NTAT"/>
+    </Method>
+</DerivedParameter>
