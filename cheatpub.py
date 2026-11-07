@@ -35,7 +35,7 @@ except Exception:
     ZoneInfo = None
     LOCAL_TZ = None
 
-__version__ = "2.7.0"
+__version__ = "2.7.1"
 
 log = logging.getLogger("cheatpub")
 
@@ -87,7 +87,8 @@ _HEADER_RE = re.compile(
     r"(?P<cycle>\d{3,4})\s*UTC",
     re.MULTILINE,
 )
-_NBM_SOURCE_RE = re.compile(r"NBM\s+V(?P<version>\S+)\s+(?P<product>NB[SEXHP])")
+# NBM headers used to read "NBM V5.0 NBS"; they now read "NBM  NBS" (no version).
+_NBM_SOURCE_RE = re.compile(r"NBM\s+(?:V(?P<version>\S+)\s+)?(?P<product>NB[SEXHP])")
 _TOKEN_RE = re.compile(r"[^\s|]+")
 _MAJOR_SEC_RE = re.compile(r"\s*(X/N|N/X|P12|POP12|MN/MX)(?=\s|\||$)")
 _ENSEMBLE_ROW_RE = re.compile(r"\s*(MEAN|AVG|HI|LO|LOW)(?=\s|\||$)")
