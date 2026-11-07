@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<DerivedParameter abbreviation="THKwarm" name="1000 500mb Thickness Warm" unit="m">
+    <Method name="Alias" levels="Layer">
+        <Field abbreviation="dZ" level="1000MB-500MB"/>
+    </Method>
+</DerivedParameter>

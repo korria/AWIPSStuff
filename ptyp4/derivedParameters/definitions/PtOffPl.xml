@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<DerivedParameter abbreviation="PtOffPl" name="Sleet Offset" unit="mm">
+    <Method name="Multiply">
+        <Field abbreviation="PtMaskPl"/>
+        <ConstantField value="200"/>
+    </Method>
+</DerivedParameter>

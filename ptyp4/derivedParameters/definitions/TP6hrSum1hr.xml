@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<DerivedParameter abbreviation="TP6hrSum1hr" name="6hr Precip Summed From 1hr" unit="mm">
+    <Method name="Add">
+        <Field abbreviation="TP1hr"/>
+        <Field abbreviation="TP1hr" timeShift="-3600"/>
+        <Field abbreviation="TP1hr" timeShift="-7200"/>
+        <Field abbreviation="TP1hr" timeShift="-10800"/>
+        <Field abbreviation="TP1hr" timeShift="-14400"/>
+        <Field abbreviation="TP1hr" timeShift="-18000"/>
+    </Method>
+</DerivedParameter>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<DerivedParameter abbreviation="PtRaA" name="Rain Mask Step 1" unit="">
+    <Method name="Multiply">
+        <Field abbreviation="CRAIN"/>
+        <Field abbreviation="PtNotFz"/>
+    </Method>
+</DerivedParameter>

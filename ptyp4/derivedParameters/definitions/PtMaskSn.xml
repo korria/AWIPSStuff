@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<DerivedParameter abbreviation="PtMaskSn" name="Snow Mask" unit="">
+    <Method name="Multiply">
+        <Field abbreviation="PtSnA"/>
+        <Field abbreviation="PtNotPl"/>
+    </Method>
+</DerivedParameter>

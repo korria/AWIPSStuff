@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<DerivedParameter abbreviation="PtOffSn" name="Snow Offset" unit="mm">
+    <Method name="Multiply">
+        <Field abbreviation="PtMaskSn"/>
+        <ConstantField value="100"/>
+    </Method>
+</DerivedParameter>

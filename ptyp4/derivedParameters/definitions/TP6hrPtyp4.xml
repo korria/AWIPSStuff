@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<DerivedParameter abbreviation="TP6hrPtyp4" name="6hr Precip by Type" unit="mm">
+    <Method name="Add">
+        <Field abbreviation="PtAmt"/>
+        <Field abbreviation="PtOffset"/>
+    </Method>
+</DerivedParameter>

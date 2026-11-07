@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<DerivedParameter abbreviation="PtOffFz" name="Freezing Rain Offset" unit="mm">
+    <Method name="Multiply">
+        <Field abbreviation="CFRZR"/>
+        <ConstantField value="300"/>
+    </Method>
+</DerivedParameter>

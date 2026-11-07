@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<DerivedParameter abbreviation="THK540" name="1000 500mb Thickness 540" unit="m">
+    <Method name="Alias" levels="Layer">
+        <Field abbreviation="dZ" level="1000MB-500MB"/>
+    </Method>
+</DerivedParameter>

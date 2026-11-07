@@ -1,0 +1,6 @@
+    <contribute xsi:type="titleImgItem" titleText="------ Precip Type QPF ------"/>
+    <contribute xsi:type="menuItem" menuText="6hr Precip by Type" key="TP6hrPtyp4" indentText="true"/>
+    <contribute xsi:type="menuItem" menuText="1hr Precip by Type" key="TP1hrPtyp4" indentText="true"/>
+    <contribute xsi:type="menuItem" menuText="Thickness Cold" key="THKcold" indentText="true"/>
+    <contribute xsi:type="menuItem" menuText="Thickness 540" key="THK540" indentText="true"/>
+    <contribute xsi:type="menuItem" menuText="Thickness Warm" key="THKwarm" indentText="true"/>

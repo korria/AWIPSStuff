@@ -1,0 +1,33 @@
+    <styleRule>
+        <paramLevelMatches>
+            <parameter>THKcold</parameter>
+        </paramLevelMatches>
+        <contourStyle>
+            <displayUnits>dam</displayUnits>
+            <contourLabeling labelSpacing="4" labelFormat="#">
+                <values>486 492 498 504 510 516 522 528 534</values>
+            </contourLabeling>
+        </contourStyle>
+    </styleRule>
+    <styleRule>
+        <paramLevelMatches>
+            <parameter>THK540</parameter>
+        </paramLevelMatches>
+        <contourStyle>
+            <displayUnits>dam</displayUnits>
+            <contourLabeling labelSpacing="4" labelFormat="#">
+                <values>540</values>
+            </contourLabeling>
+        </contourStyle>
+    </styleRule>
+    <styleRule>
+        <paramLevelMatches>
+            <parameter>THKwarm</parameter>
+        </paramLevelMatches>
+        <contourStyle>
+            <displayUnits>dam</displayUnits>
+            <contourLabeling labelSpacing="4" labelFormat="#">
+                <values>546 552 558 564 570 576 582</values>
+            </contourLabeling>
+        </contourStyle>
+    </styleRule>

@@ -1,0 +1,26 @@
+    <styleRule>
+        <paramLevelMatches>
+            <parameter>TP6hrPtyp4</parameter>
+        </paramLevelMatches>
+        <imageStyle>
+            <displayUnits>mm</displayUnits>
+            <range scale="LINEAR">
+                <minValue>0</minValue>
+                <maxValue>400</maxValue>
+            </range>
+            <defaultColormap>Grid/PtypQPF4</defaultColormap>
+        </imageStyle>
+    </styleRule>
+    <styleRule>
+        <paramLevelMatches>
+            <parameter>TP1hrPtyp4</parameter>
+        </paramLevelMatches>
+        <imageStyle>
+            <displayUnits>mm</displayUnits>
+            <range scale="LINEAR">
+                <minValue>0</minValue>
+                <maxValue>400</maxValue>
+            </range>
+            <defaultColormap>Grid/PtypRate4</defaultColormap>
+        </imageStyle>
+    </styleRule>

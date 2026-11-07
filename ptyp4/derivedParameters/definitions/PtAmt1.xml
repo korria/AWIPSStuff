@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<DerivedParameter abbreviation="PtAmt1" name="1hr Precip Where Typed" unit="mm">
+    <Method name="Multiply">
+        <Field abbreviation="TP1hr"/>
+        <Field abbreviation="PtAnyMask"/>
+    </Method>
+</DerivedParameter>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<DerivedParameter abbreviation="PtAnyMask" name="Any Precip Type Mask" unit="">
+    <Method name="Add">
+        <Field abbreviation="PtMaskRa"/>
+        <Field abbreviation="PtMaskSn"/>
+        <Field abbreviation="PtMaskPl"/>
+        <Field abbreviation="CFRZR"/>
+    </Method>
+</DerivedParameter>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<DerivedParameter abbreviation="PtNotFz" name="Not Freezing Rain" unit="">
+    <Method name="Difference">
+        <ConstantField value="1"/>
+        <Field abbreviation="CFRZR"/>
+    </Method>
+</DerivedParameter>
