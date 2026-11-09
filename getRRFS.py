@@ -14,6 +14,9 @@ not yet delivered. A failed hour stops the run, which exits 1, and the next
 run resumes from that hour.
 
 HISTORY:
+2026/11/09 - version 2.1. KA. Drop the hourly APCP bucket and keep only the
+             run total, so AWIPS (TP_RRFS-NCEP -> TPrun) gets one TPrun per
+             hour; TPrun had shown hourly amounts and TP1hr was missing.
 2026/11/07 - version 2.0. KA. Wait until every hour (f001-f084) is posted;
              the f072 check let runs start while f073-f084 were still posting
              (late hours post out of order). Look only in rrfs. date folders
@@ -127,6 +130,10 @@ def clip_grib_west(input_path, output_path, f_hour):
         WGRIB2_BIN,
         input_path,
         '-not', 'aerosol=',
+        # Keep only the run-total APCP (0-N h). AWIPS renames every RRFS TP to
+        # TPrun, so the hourly bucket (N-1 to N h) would also become TPrun; the
+        # LRRFS accumulation config rebuilds TP1hr/TP3hr/TP6hr from TPrun.
+        '-not', ':APCP:surface:[1-9][0-9]*-[0-9]+ hour acc',
         '-set_grib_type','c3',   # -small_grib otherwise writes simple packing (~2x larger)
         '-small_grib',lon_bounds,lat_bounds,
         temp_met
