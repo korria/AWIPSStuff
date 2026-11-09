@@ -20,6 +20,10 @@
 # v2026.11.06 - cp -> CPRAT and sf -> TSRWE in mm, as AIFS.
 # v2026.11.06 - Domain 180-40W, 15-70N (1401 x 551), was 160-60W, 20-60N.
 # v2026.11.06 - Add surface z (f000 only) as HGT (m) terrain, same as getECAI.
+# v2026.11.09 - GFS-style fields: BL wind (copy of 100 m wind labelled 30-0 mb
+#               above ground), PW from tcwv, mucape relabelled 255-0 mb above
+#               ground (AWIPS has no level 17), WEASD (mm) and SNOD (m) from
+#               sd and snow density rsn.
 #
 import os
 import json
@@ -60,7 +64,11 @@ SFC_PARAMS = {
     '100u', '100v', '10u', '10v', '2d', '2t', 'cp', 'hcc', 'lcc', 'mcc',
     'msl', 'sf', 'skt', 'sot', 'sp', 'ssrd', 'strd', 'tcc', 'tcw', 'tp',
     'vsw', 'z', '10fg', 'mucape', 'ptype', 'mx2t3', 'mn2t3', 'mx2t6', 'mn2t6',
+    'tcwv', 'sd',
 }
+# Snow density, downloaded ahead of SFC_PARAMS so sanitize_grib sees it before
+# sd (it is needed to turn sd into snow depth).
+FIRST_SFC_PARAMS = {'rsn'}
 PL_PARAMS = {'gh', 'q', 't', 'u', 'v', 'w'}
 
 # ECMWF precip type codes -> NCEP-style categorical yes/no fields.
@@ -179,7 +187,8 @@ def fetch(path, byte_range=None, max_retries=6):
 def download_fields(date_str, cycle, f_hour, out_path):
     """Write the wanted GRIB messages from the sfc and pl files to out_path."""
     with open(out_path, 'wb') as out:
-        for kind, params, is_pl in (('sfc', SFC_PARAMS, False), ('pl', PL_PARAMS, True)):
+        for kind, params, is_pl in (('sfc', FIRST_SFC_PARAMS, False),
+                                    ('sfc', SFC_PARAMS, False), ('pl', PL_PARAMS, True)):
             base = src_key(date_str, cycle, f_hour, kind)
             index = fetch(base + '.index').decode()
             for span_start, span_end, pieces in group_ranges(wanted_ranges(index, params, is_pl)):
@@ -195,9 +204,13 @@ def sanitize_grib(input_path, output_path, f_hour):
             0.1 deg points, so values are copied, and ptype stays categorical.
     Step 2: tp (ECMWF local 0-1-193, metres) -> APCP (kg m-2 = mm), as in
             getECAI; surface geopotential z (f000 only) -> HGT terrain (m);
+            GFS-style PW, MUCAPE, BL wind, WEASD and SNOD;
             append CRAIN/CSNOW/CFRZR/CICEP derived from PTYPE.
+    wgrib2 -if matches the record's original name, even after -set_var.
     """
     temp_path = input_path + ".box"
+    # sd is ECMWF local 0-1-254 (m of water); names vary by wgrib2 build, as tp.
+    sd = ':(sd|var0_1_254|var0_1_1_98_1_254):'
     cmd_step1 = [
         WGRIB2_BIN, input_path,
         '-set_grib_type', 'c3',
@@ -246,8 +259,34 @@ def sanitize_grib(input_path, output_path, f_hour):
         '-if', ':GUST:',
             '-set_ftime', f'{f_hour} hour fcst',
         '-endif',
+        # tcwv (water vapour only) is GFS's PWAT; label it the same so AWIPS
+        # shows PW. tcw also counts cloud, rain and snow water. Level type 10
+        # is AWIPS EA, as GFS PWAT; GFS's own type 200 is NCEP-local, which
+        # AWIPS only knows for NCEP data.
+        '-if', ':TCIWV:',
+            '-set_var', 'PWAT',
+            '-set_lev', 'entire atmosphere',
+        '-endif',
+        # mucape comes on level 17 (most unstable parcel), reserved in AWIPS's
+        # level table; GFS sends most-unstable CAPE as 255-0 mb above ground.
+        '-if', ':CAPE:',
+            '-set_lev', '255-0 mb above ground',
+        '-endif',
+        # Snow density (kg m-3) is stored for snow depth below; sd -> WEASD (mm).
+        '-if', ':SDEN:', '-rpn', 'sto_2', '-endif',
+        '-if', sd, '-rpn', '1000:*', '-set_var', 'WEASD', '-endif',
         '-set_grib_type', 'c3',
         '-grib_out', output_path,
+        # Extra copies, written after each record above.
+        # BL wind like GFS (30-0 mb above ground): 100 m is ~10-12 mb above the
+        # ground, mid-layer; GFS's own 100 m and 0-30 mb speeds differ ~0.2 m/s.
+        '-if', ':(UGRD|VGRD):100 m above ground:',
+            '-set_lev', '30-0 mb above ground', '-grib_out', output_path,
+        '-endif',
+        # Snow depth (m) = water equivalent (mm = kg m-2) / density (kg m-3).
+        '-if', sd,
+            '-rpn', 'rcl_2:/', '-set_var', 'SNOD', '-grib_out', output_path,
+        '-endif',
     ]
     # Keep PTYPE (written above) and append NCEP-style 0/1 categorical fields.
     cmd_step2 += ['-if', ':PTYPE:', '-rpn', 'sto_1']
