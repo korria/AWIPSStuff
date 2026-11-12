@@ -14,6 +14,10 @@ not yet delivered. A failed hour stops the run, which exits 1, and the next
 run resumes from that hour.
 
 HISTORY:
+2026/11/12 - version 2.2. KA. Swap the 1 km and 4 km AGL reflectivity (REFD)
+             levels back. RRFS files carry each under the other's level:
+             checked against HRRR for 12z f006 and 06z f012 on 2026/11/12.
+             Remove the swap once NCEP corrects the labels.
 2026/11/09 - version 2.1. KA. Drop the hourly APCP bucket and keep only the
              run total, so AWIPS (TP_RRFS-NCEP -> TPrun) gets one TPrun per
              hour; TPrun had shown hourly amounts and TP1hr was missing.
@@ -53,6 +57,15 @@ STATE_MAX_AGE_DAYS = 3              # must be more than MAX_LOOKBACK_DAYS
 # Western US Clipping Bounds (Longitude: West:East, Latitude: South:North)
 # This covers WA, OR, CA, NV, ID, UT, AZ and parts of MT, WY, CO, NM
 WEST_BOUNDS = "-126:-101 31:50"
+
+# RRFS labels its 1 km AGL reflectivity as 4000 m and its 4 km AGL
+# reflectivity as 1000 m. Each record is written out under the correct level.
+# Delete this (and the matching -not in clip_grib_west) once NCEP fixes the
+# labels, or AWIPS will show them reversed again.
+REFD_LEVEL_SWAP = [
+    (':REFD:1000 m above ground:', '4000 m above ground'),
+    (':REFD:4000 m above ground:', '1000 m above ground'),
+]
 
 # Source: rrfs.YYYYMMDD/HH/rrfs.tHHz.2dfld.3km.fFFF.conus.grib2
 SRC_FILENAME_TEMPLATE = "rrfs.t{}z.2dfld.3km.f{:03d}.conus.grib2"
@@ -122,6 +135,8 @@ def clip_grib_west(input_path, output_path, f_hour):
     temp_met = input_path + ".met"
     temp_smoke_raw = input_path + ".smoke_raw"
     temp_smoke_final = input_path + ".smoke_final"
+    temp_refd = [f"{input_path}.refd{i}" for i in range(len(REFD_LEVEL_SWAP))]
+    temp_files = [temp_met, *temp_refd, temp_smoke_raw, temp_smoke_final]
 
     lon_bounds = WEST_BOUNDS.split()[0]
     lat_bounds = WEST_BOUNDS.split()[1]
@@ -134,9 +149,22 @@ def clip_grib_west(input_path, output_path, f_hour):
         # TPrun, so the hourly bucket (N-1 to N h) would also become TPrun; the
         # LRRFS accumulation config rebuilds TP1hr/TP3hr/TP6hr from TPrun.
         '-not', ':APCP:surface:[1-9][0-9]*-[0-9]+ hour acc',
+        '-not', ':REFD:(1000|4000) m above ground:',   # relabelled below
         '-set_grib_type','c3',   # -small_grib otherwise writes simple packing (~2x larger)
         '-small_grib',lon_bounds,lat_bounds,
         temp_met
+    ]
+
+    # One pass per record: a single pass with two -if blocks could swap a
+    # record and then swap it back.
+    cmds_refd = [
+        [WGRIB2_BIN, input_path,
+         '-match', match,
+         '-set_lev', level,
+         '-set_grib_type', 'c3',
+         '-small_grib', lon_bounds, lat_bounds,
+         temp]
+        for (match, level), temp in zip(REFD_LEVEL_SWAP, temp_refd)
     ]
 
     cmd_smoke_clip = [
@@ -171,12 +199,14 @@ def clip_grib_west(input_path, output_path, f_hour):
 
     try:
         subprocess.check_output(cmd_met, stderr=subprocess.STDOUT)
+        for cmd in cmds_refd:
+            subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         subprocess.check_output(cmd_smoke_pdt, stderr=subprocess.STDOUT)
         if os.path.exists(temp_smoke_raw):
             subprocess.check_output(cmd_smoke_clip, stderr=subprocess.STDOUT)
 
         with open(output_path, 'wb') as outfile:
-            for f_name in [temp_met, temp_smoke_raw, temp_smoke_final]:
+            for f_name in temp_files:
                 if os.path.exists(f_name):
                     with open(f_name, 'rb') as inFile:
                         shutil.copyfileobj(inFile, outfile)
@@ -188,7 +218,7 @@ def clip_grib_west(input_path, output_path, f_hour):
         log.error(f"wgrib2 binary not found at {WGRIB2_BIN}")
         return False
     finally:
-        for temp_file in [temp_met, temp_smoke_raw, temp_smoke_final]:
+        for temp_file in temp_files:
             if os.path.exists(temp_file):
                 os.remove(temp_file)
 
