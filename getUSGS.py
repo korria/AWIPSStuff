@@ -8,6 +8,11 @@
 #  storing.
 #
 #  HISTORY:
+#   2026-11-23 - KA - Moved to the USGS Water Data API (waterservices.usgs.gov
+#                     is being retired). One request for all stations instead
+#                     of one per station, with a timeout and retries; a failed
+#                     run exits 1 without touching lastobs, so the next run
+#                     fills the gap (one connection reset used to crash it).
 #   2024-08-06 - KA - Modernized code, and rewrote to ingest json from USGS
 #   2022-07-12 - KA - Updated sites and for HCI/py3.
 #   2017-12-11 - Tim Barker - SOO BOI - Original Version
@@ -19,12 +24,8 @@
 #
 #
 import requests
-import json
 from datetime import datetime, timezone
-import urllib.request, urllib.parse, urllib.error,time,re,os,sys,calendar
-import xml.etree.ElementTree as ET
-from io import StringIO
-from xml.etree.ElementTree import tostring
+import os,sys,time
 #
 #
 #
@@ -64,25 +65,37 @@ def getLastOb():
          lastob[stnid]=int(obtime)
    return lastob
 
-# Function to convert local time to UTC and extract components
-def convert_to_utc_components(local_time_str):
-    # Parse the local time string
-    local_time = datetime.strptime(local_time_str, "%Y-%m-%dT%H:%M:%S.%f%z")
-
-    # Convert to UTC
-    utc_time = local_time.astimezone(timezone.utc)
-
-    # Extract year, month, day, hour, minute
-    year = utc_time.year
-    month = utc_time.month
-    day = utc_time.day
-    hour = utc_time.hour
-    minute = utc_time.minute
-
-    # Get seconds since epoch
-    epoch_seconds = int(utc_time.timestamp())
-
-    return year, month, day, hour, minute, epoch_seconds
+#==============================================================================
+#
+#  getObs - one request for the last 6 hours of gage height (00065) at every
+#           station. Returns a list of {monitoring_location_id, time, value}.
+#           If USGS can't be reached it exits 1 and leaves lastobs alone, so
+#           the next run picks up the gap.
+#
+def getObs():
+   params={
+      "f":"json",
+      "monitoring_location_id":",".join("USGS-%d"%v[0] for v in STNIDS.values()),
+      "parameter_code":"00065",
+      "time":"PT6H",
+      "skipGeometry":"true",
+      "properties":"monitoring_location_id,time,value",
+      "limit":10000,
+   }
+   for attempt in range(1,TRIES+1):
+      try:
+         response=requests.get(API_URL,params=params,timeout=60)
+         response.raise_for_status()   # a 429 here means USGS wants an API key
+         data=response.json()
+         if any(link.get("rel")=="next" for link in data.get("links",[])):
+            logdate("WARNING: USGS response has another page - some data not read")
+         return [feature["properties"] for feature in data["features"]]
+      except (requests.RequestException,ValueError,KeyError) as e:
+         logdate("Attempt %d of %d failed: %s"%(attempt,TRIES,e))
+         if attempt<TRIES:
+            time.sleep(30*attempt)
+   logdate("Could not get data from USGS - will try again next run")
+   sys.exit(1)
 #==============================================================================
 #
 #  M A I N
@@ -121,64 +134,48 @@ STNIDS={
 LASTFILE="/ldad/localapps/getUSGS/lastobs.dat"
 OUTFILE="/ldad/localapps/getUSGS/PRODBOIRR5BOI"
 FULLFILE="/data/Incoming/PRODBOIRR5BOI"
+API_URL="https://api.waterdata.usgs.gov/ogcapi/v1/collections/continuous/items"
+TRIES=3
 
 #
 #  Get last obs times
 #
 lastob=getLastOb()
 #
-#  Setup blank output
+#  Get the obs, keeping only times newer than the last ob at each station
+#
+logdate("Getting data for %d stations"%len(STNIDS))
+SITES={"USGS-%d"%v[0]:stnid for stnid,v in STNIDS.items()}  # USGS id -> Handbook5 id
+newobs={stnid:{} for stnid in STNIDS}  # stnid -> {epoch seconds: (UTC time, value)}
+seen=set()
+for ob in getObs():
+   stnid=SITES.get(ob["monitoring_location_id"])
+   if stnid is None:
+      continue
+   seen.add(stnid)
+   if ob["value"] is None:
+      continue
+   obtime=datetime.fromisoformat(ob["time"]).astimezone(timezone.utc)
+   epoch=int(obtime.timestamp())
+   if epoch>lastob[stnid]:
+      newobs[stnid].setdefault(epoch,(obtime,float(ob["value"])))
+missing=[stnid for stnid in STNIDS if stnid not in seen]
+if missing:
+   logdate("No data from USGS for: %s"%" ".join(missing))
+#
+#  SHEF lines in station order, oldest first; the newest becomes the last ob
 #
 outlines=[]
-outdata=0
-#
-#  Loop over configured stations
-#
-for stnid in list(STNIDS.keys()):
-   logdate("Getting data for station %s"%stnid)
-   stnnum=STNIDS[stnid][0]
-   lastdata=0 # last time of new data for this station
-   #
-   #  period=P1D for 1 day
-   #  period PT6H for 6 hours
-   #
-   url=f"https://waterservices.usgs.gov/nwis/iv/?format=json&period=PT6H&parameterCd=00065&siteStatus=all&sites={stnnum}"
-
-   # Fetch the data from the URL
-   response = requests.get(url)
-   data = response.json()
-
-   # Parse the date and values
-   parsed_data = []
-
-   # Navigating to the time series data in the JSON structure
-   time_series = data['value']['timeSeries'][0]['values'][0]['value']
-
-   # Extracting the date and value
-   for entry in time_series:
-      date = entry['dateTime']
-
-      year, month, day, hour, minute, epoch_seconds = convert_to_utc_components(date)
-      if epoch_seconds>lastob[stnid]:
-         if(epoch_seconds>lastdata):
-            lastdata=epoch_seconds
-         if entry['value'] is not None:
-            value = float(entry['value'])  # Convert value to float
-            formatted_str = f".A {stnid} {year % 100:02d}{month:02d}{day:02d} Z DH{hour:02d}{minute:02d} /HG {value:8.2f}"
-            outlines.append(formatted_str)
-            outdata=1
-
-   #
-   #  If we got data from this station later than the previous data for
-   #  this station - then take the lastest of the new data - and set it
-   #  as the last data time for this station
-   #
-   if lastdata>0:
-      lastob[stnid]=lastdata
+for stnid,obs in newobs.items():
+   for epoch in sorted(obs):
+      (obtime,value)=obs[epoch]
+      outlines.append(f".A {stnid} {obtime:%y%m%d} Z DH{obtime:%H%M} /HG {value:8.2f}")
+   if obs:
+      lastob[stnid]=max(obs)
 #
 #  If nothing needs to be output - then log it and leave everything as it was
 #
-if outdata==0:
+if not outlines:
    logdate("No new data")
    logdate("Finished getUSGS")
    sys.exit(0)
